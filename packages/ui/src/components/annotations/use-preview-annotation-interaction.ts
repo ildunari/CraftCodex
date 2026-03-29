@@ -18,6 +18,7 @@
 
 import * as React from 'react'
 import type { AnnotationV1 } from '@craft-agent/core'
+import type { SurfaceSelection, FollowUpContext, ResolvedAnnotation, SelectionScope } from './types'
 import { useAnnotationInteractionController } from './use-annotation-interaction-controller'
 import { useAnnotationIslandPresentation } from './use-annotation-island-presentation'
 import { useAnnotationIslandEvents } from './use-annotation-island-events'
@@ -54,29 +55,17 @@ import type { IslandTransitionConfig } from '../ui'
 /** Surface abstraction — callers provide a `getSurface` function returning any
  *  object that satisfies this interface (PdfAnnotationSurface, HtmlAnnotationSurface, etc.) */
 export interface AnnotationSurfaceLike {
-  captureSelection(): CapturedSelectionLike | null
-  resolveAnnotation(annotation: AnnotationV1): ResolvedAnnotationLike | null
-  getFollowUpContext(params: {
-    selectedText: string
-    prefix: string
-    suffix: string
-    scope: Record<string, unknown>
-  }): { surroundingText: string; documentType: string }
-  /** Optional: get host-document-relative selection rects (HTML surfaces). */
-  getSelectionRects?: (captured: CapturedSelectionLike) => DOMRect[]
+  captureSelection(): SurfaceSelection | null
+  resolveAnnotation(annotation: AnnotationV1): ResolvedAnnotation | null
+  getFollowUpContext(sel: SurfaceSelection): FollowUpContext
+  getSelectionRects?: (sel: SurfaceSelection) => DOMRect[]
 }
 
-export interface CapturedSelectionLike {
-  selectedText: string
-  prefix: string
-  suffix: string
-  scope: { kind: string; [key: string]: unknown }
-}
+/** @deprecated Use SurfaceSelection directly */
+export type CapturedSelectionLike = SurfaceSelection
 
-export interface ResolvedAnnotationLike {
-  isValid: boolean
-  rects: DOMRect[]
-}
+/** @deprecated Use ResolvedAnnotation directly */
+export type ResolvedAnnotationLike = ResolvedAnnotation
 
 /** Document metadata to attach to saved annotations. */
 export interface DocumentMeta {
@@ -150,8 +139,8 @@ export interface PreviewAnnotationInteractionResult {
     sourceKey: string
     replayNonce: number
     isVisible: boolean
-    activeView: string
-    mode: string
+    activeView: 'compact' | 'confirm-follow-up'
+    mode: 'edit' | 'view'
     draft: string
     onDraftChange: (next: string) => void
     onOpenFollowUp: () => void
@@ -481,13 +470,15 @@ export function usePreviewAnnotationInteraction(
     if (!pendingSelection) return
 
     const surface = getSurface()
+    // Build a SurfaceSelection from the AnchoredSelection for context extraction
+    const surfaceSel: SurfaceSelection = {
+      selectedText: pendingSelection.selectedText,
+      prefix: pendingSelection.prefix,
+      suffix: pendingSelection.suffix,
+      scope: { kind: expectedScopeKind } as SelectionScope,
+    }
     const context = surface
-      ? surface.getFollowUpContext({
-          selectedText: pendingSelection.selectedText,
-          prefix: pendingSelection.prefix,
-          suffix: pendingSelection.suffix,
-          scope: { kind: expectedScopeKind },
-        })
+      ? surface.getFollowUpContext(surfaceSel)
       : { surroundingText: pendingSelection.selectedText, documentType: expectedScopeKind }
 
     try {
