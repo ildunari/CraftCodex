@@ -243,6 +243,8 @@ export interface StoredAttachment {
   markdownPath?: string;         // For Office files: converted markdown for Claude
   wasResized?: boolean;          // True if image was auto-resized for Claude API limits
   resizedBase64?: string;        // Base64 of resized image (only when wasResized=true, for Claude API)
+  displayCodeFence?: string;     // Pre-built code fence for display (e.g. docx-preview JSON)
+  fingerprint?: string;          // Content fingerprint for cache invalidation
 }
 
 /**

@@ -2,7 +2,7 @@ import { readFile, writeFile, unlink, mkdir, readdir, stat } from 'fs/promises'
 import { join, resolve, dirname, parse as parsePath } from 'path'
 import { homedir } from 'os'
 import { validatePathFormat } from '../../utils/path-validation'
-import { randomUUID } from 'crypto'
+import { randomUUID, createHash } from 'crypto'
 import { RPC_CHANNELS, type FileAttachment, type DirectoryListingResult } from '@craft-agent/shared/protocol'
 import type { StoredAttachment } from '@craft-agent/core/types'
 import { readFileAttachment, validateImageForClaudeAPI, IMAGE_LIMITS } from '@craft-agent/shared/utils'
@@ -370,6 +370,27 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
         }
       }
 
+      // 4. Generate display code fence for rich preview blocks
+      // DOCX files get a docx-preview fence so the UI can render them inline
+      let displayCodeFence: string | undefined
+      let fingerprint: string | undefined
+
+      if (attachment.type === 'office' && attachment.name.toLowerCase().endsWith('.docx')) {
+        // Build content fingerprint for cache invalidation
+        const fileBuffer = await readFile(storedPath)
+        const header = fileBuffer.subarray(0, Math.min(4096, fileBuffer.length))
+        const hash = createHash('sha256').update(header).digest('hex').slice(0, 16)
+        fingerprint = `${attachment.name}:${finalSize}:${hash}`
+
+        const fencePayload = JSON.stringify({
+          src: storedPath,
+          title: attachment.name,
+          fingerprint,
+        })
+        displayCodeFence = `\`\`\`docx-preview\n${fencePayload}\n\`\`\``
+        deps.platform.logger.info(`Generated docx-preview code fence for: ${attachment.name}`)
+      }
+
       // Return StoredAttachment metadata
       // Include wasResized flag so UI can show notification
       // Include resizedBase64 so renderer uses resized image for Claude API
@@ -386,6 +407,8 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
         markdownPath,
         wasResized,
         resizedBase64, // Only set when wasResized=true, used for Claude API
+        displayCodeFence,
+        fingerprint,
       }
     } catch (error) {
       // Clean up any files we've written before the error
