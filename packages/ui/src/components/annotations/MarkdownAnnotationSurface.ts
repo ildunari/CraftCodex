@@ -153,11 +153,18 @@ export class MarkdownAnnotationSurface implements AnnotationSurface {
   }
 
   observeGeometryInvalidation(cb: () => void): () => void {
-    // Listen for resize, scroll, and element size changes
-    const handleResize = () => cb()
+    // Throttle to at most once per animation frame
+    let rafId: number | null = null
+    const throttledCb = () => {
+      if (rafId !== null) return
+      rafId = requestAnimationFrame(() => {
+        rafId = null
+        cb()
+      })
+    }
 
     try {
-      window.addEventListener('resize', handleResize)
+      window.addEventListener('resize', throttledCb)
     } catch {
       // No window in test environment
       return () => {}
@@ -166,22 +173,23 @@ export class MarkdownAnnotationSurface implements AnnotationSurface {
     // Scroll observation on the root's scroll container
     const scrollParent = findScrollParent(this.root)
     if (scrollParent) {
-      scrollParent.addEventListener('scroll', handleResize, { passive: true })
+      scrollParent.addEventListener('scroll', throttledCb, { passive: true })
     }
 
     // ResizeObserver for content reflows
     let resizeObserver: ResizeObserver | undefined
     try {
-      resizeObserver = new ResizeObserver(handleResize)
+      resizeObserver = new ResizeObserver(throttledCb)
       resizeObserver.observe(this.root)
     } catch {
       // ResizeObserver not available
     }
 
     return () => {
-      try { window.removeEventListener('resize', handleResize) } catch { /* noop */ }
+      if (rafId !== null) cancelAnimationFrame(rafId)
+      try { window.removeEventListener('resize', throttledCb) } catch { /* noop */ }
       if (scrollParent) {
-        scrollParent.removeEventListener('scroll', handleResize)
+        scrollParent.removeEventListener('scroll', throttledCb)
       }
       resizeObserver?.disconnect()
     }

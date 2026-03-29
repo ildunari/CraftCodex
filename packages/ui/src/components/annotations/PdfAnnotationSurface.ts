@@ -316,29 +316,38 @@ export class PdfAnnotationSurface implements AnnotationSurface {
   // -------------------------------------------------------------------------
 
   observeGeometryInvalidation(cb: () => void): () => void {
-    const handleChange = () => cb()
+    // Throttle to at most once per animation frame
+    let rafId: number | null = null
+    const throttledCb = () => {
+      if (rafId !== null) return
+      rafId = requestAnimationFrame(() => {
+        rafId = null
+        cb()
+      })
+    }
 
     try {
-      window.addEventListener('resize', handleChange)
+      window.addEventListener('resize', throttledCb)
     } catch {
       return () => {}
     }
 
     // Watch scroll on the container (PDF overlay scrolls)
-    this.container.addEventListener('scroll', handleChange, { passive: true })
+    this.container.addEventListener('scroll', throttledCb, { passive: true })
 
     // ResizeObserver for container size changes (zoom, etc.)
     let resizeObserver: ResizeObserver | undefined
     try {
-      resizeObserver = new ResizeObserver(handleChange)
+      resizeObserver = new ResizeObserver(throttledCb)
       resizeObserver.observe(this.container)
     } catch {
       // Not available
     }
 
     return () => {
-      try { window.removeEventListener('resize', handleChange) } catch { /* noop */ }
-      this.container.removeEventListener('scroll', handleChange)
+      if (rafId !== null) cancelAnimationFrame(rafId)
+      try { window.removeEventListener('resize', throttledCb) } catch { /* noop */ }
+      this.container.removeEventListener('scroll', throttledCb)
       resizeObserver?.disconnect()
     }
   }

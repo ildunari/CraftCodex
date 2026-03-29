@@ -227,11 +227,19 @@ export class HtmlAnnotationSurface implements AnnotationSurface {
   // -------------------------------------------------------------------------
 
   observeGeometryInvalidation(cb: () => void): () => void {
-    const handleChange = () => cb()
+    // Throttle to at most once per animation frame
+    let rafId: number | null = null
+    const throttledCb = () => {
+      if (rafId !== null) return
+      rafId = requestAnimationFrame(() => {
+        rafId = null
+        cb()
+      })
+    }
 
     // Parent window resize
     try {
-      window.addEventListener('resize', handleChange)
+      window.addEventListener('resize', throttledCb)
     } catch {
       return () => {}
     }
@@ -241,9 +249,9 @@ export class HtmlAnnotationSurface implements AnnotationSurface {
     try {
       const win = this.iframe.contentWindow
       if (win) {
-        win.addEventListener('scroll', handleChange, { passive: true })
+        win.addEventListener('scroll', throttledCb, { passive: true })
         iframeCleanup = () => {
-          try { win.removeEventListener('scroll', handleChange) } catch { /* noop */ }
+          try { win.removeEventListener('scroll', throttledCb) } catch { /* noop */ }
         }
       }
     } catch {
@@ -253,14 +261,15 @@ export class HtmlAnnotationSurface implements AnnotationSurface {
     // ResizeObserver on iframe element
     let resizeObserver: ResizeObserver | undefined
     try {
-      resizeObserver = new ResizeObserver(handleChange)
+      resizeObserver = new ResizeObserver(throttledCb)
       resizeObserver.observe(this.iframe)
     } catch {
       // Not available
     }
 
     return () => {
-      try { window.removeEventListener('resize', handleChange) } catch { /* noop */ }
+      if (rafId !== null) cancelAnimationFrame(rafId)
+      try { window.removeEventListener('resize', throttledCb) } catch { /* noop */ }
       iframeCleanup?.()
       resizeObserver?.disconnect()
     }
