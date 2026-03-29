@@ -7,7 +7,7 @@ const MAX_SURROUNDING_TEXT_LENGTH = 1000
 
 /** Escape markdown metacharacters to prevent injection. */
 export function escapeMarkdown(text: string): string {
-  return text.replace(/([>*_`\[\]#~\\|])/g, '\\$1')
+  return text.replace(/([>*_`\[\]#~\\|!()\-+])/g, '\\$1')
 }
 
 /** Truncate text to max length with ellipsis. */

@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'bun:test'
 import { DocxAnnotationSurface } from '../DocxAnnotationSurface'
-import { HtmlAnnotationSurface } from '../HtmlAnnotationSurface'
 import type { SurfaceSelection } from '../types'
 import { classifyFile, FILE_EXTENSIONS_PATTERN } from '../../../lib/file-classification'
 
@@ -59,9 +58,11 @@ describe('DocxAnnotationSurface', () => {
     expect(surface.kind).toBe('docx')
   })
 
-  it('extends HtmlAnnotationSurface', () => {
+  it('uses composition (not inheritance) over HtmlAnnotationSurface', () => {
     const surface = new DocxAnnotationSurface(mockIframe())
-    expect(surface).toBeInstanceOf(HtmlAnnotationSurface)
+    // Should NOT be an instance of HtmlAnnotationSurface — uses composition
+    expect(surface.kind).toBe('docx')
+    expect(typeof surface.captureSelection).toBe('function')
   })
 
   it('accepts optional docxFileName parameter', () => {
@@ -129,8 +130,8 @@ describe('DocxAnnotationSurface inherited behavior', () => {
 
   it('getSelectionRects returns empty array when contentDocument is null', () => {
     const surface = new DocxAnnotationSurface(mockIframe())
-    const sel = makeSel('test')
-    // Uses html scope kind since that's what the parent checks
+    const sel = makeSel('test', 'docx')
+    // Composition: docx scope is translated to html scope for the inner surface
     expect(surface.getSelectionRects(sel)).toEqual([])
   })
 

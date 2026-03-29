@@ -20,6 +20,7 @@ import type {
 } from './types'
 import { extractContext } from './pdf-text-utils'
 import { annotationColorToCss } from './annotation-style-tokens'
+import { findQuoteOffset } from './find-quote-with-context'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -240,7 +241,12 @@ export class PdfAnnotationSurface implements AnnotationSurface {
       const textLayer = page.querySelector('.react-pdf__Page__textContent')
       if (!textLayer) continue
 
-      const rects = this.findTextRects(textLayer as HTMLElement, quote.exact)
+      const rects = this.findTextRectsWithContext(
+        textLayer as HTMLElement,
+        quote.exact,
+        quote.prefix,
+        quote.suffix,
+      )
       if (rects.length > 0) {
         return { rects, isValid: true }
       }
@@ -359,6 +365,70 @@ export class PdfAnnotationSurface implements AnnotationSurface {
     }
 
     const idx = fullText.indexOf(searchText)
+    if (idx === -1) return []
+
+    // Map character offsets to text nodes
+    let charCount = 0
+    let startNode: Text | null = null
+    let startOffset = 0
+    let endNode: Text | null = null
+    let endOffset = 0
+    const targetEnd = idx + searchText.length
+
+    for (const node of textNodes) {
+      const len = node.textContent?.length ?? 0
+
+      if (!startNode && charCount + len > idx) {
+        startNode = node
+        startOffset = idx - charCount
+      }
+
+      if (charCount + len >= targetEnd) {
+        endNode = node
+        endOffset = targetEnd - charCount
+        break
+      }
+
+      charCount += len
+    }
+
+    if (!startNode || !endNode) return []
+
+    try {
+      const range = document.createRange()
+      range.setStart(startNode, startOffset)
+      range.setEnd(endNode, endOffset)
+      return Array.from(range.getClientRects()).filter(
+        (r) => r.width > 0 && r.height > 0,
+      )
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * Find DOMRects using prefix/suffix context for disambiguation.
+   * Falls back to findTextRects (first occurrence) when no context is available.
+   */
+  private findTextRectsWithContext(
+    textLayer: HTMLElement,
+    searchText: string,
+    prefix?: string,
+    suffix?: string,
+  ): DOMRect[] {
+    if (!searchText) return []
+
+    const walker = document.createTreeWalker(textLayer, NodeFilter.SHOW_TEXT)
+    const textNodes: Text[] = []
+    let fullText = ''
+
+    while (walker.nextNode()) {
+      const textNode = walker.currentNode as Text
+      textNodes.push(textNode)
+      fullText += textNode.textContent ?? ''
+    }
+
+    const idx = findQuoteOffset(fullText, searchText, prefix, suffix)
     if (idx === -1) return []
 
     // Map character offsets to text nodes

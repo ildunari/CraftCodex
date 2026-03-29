@@ -59,6 +59,7 @@ import {
   buildAnnotationChipEntryTransition,
 } from '../annotations/island-motion'
 import { formatCopyAsQuote } from '../annotations/follow-up-formatter-registry'
+import { sanitizeHtml, DOCX_CSP_META } from '../annotations/docx-sanitizer'
 import {
   SELECTION_POINTER_MAX_AGE_MS,
   clamp,
@@ -114,6 +115,21 @@ function injectBaseTarget(html: string): string {
     return html.replace(/(<html[^>]*>)/i, '$1<head><base target="_top"></head>')
   }
   return `<head><base target="_top"></head>${html}`
+}
+
+/**
+ * Inject a Content-Security-Policy meta tag into the HTML for defense-in-depth.
+ * Blocks external resource loading even if the sandbox attribute is bypassed.
+ */
+function injectCspMeta(html: string): string {
+  if (html.includes('Content-Security-Policy')) return html
+  if (/<head[^>]*>/i.test(html)) {
+    return html.replace(/(<head[^>]*>)/i, `$1${DOCX_CSP_META}`)
+  }
+  if (/<html[^>]*>/i.test(html)) {
+    return html.replace(/(<html[^>]*>)/i, `$1<head>${DOCX_CSP_META}</head>`)
+  }
+  return `<head>${DOCX_CSP_META}</head>${html}`
 }
 
 // ── Main component ───────────────────────────────────────────────────────────
@@ -211,11 +227,13 @@ export function MarkdownHtmlBlock({
       .finally(() => setLoading(false))
   }, [activeItem?.src, onReadFile, contentCache])
 
-  // Preprocess all cached HTML (inject base target for links)
+  // Preprocess all cached HTML: sanitize, inject CSP meta tag, inject base target for links
   const processedCache = React.useMemo(() => {
     const result: Record<string, string> = {}
     for (const [src, html] of Object.entries(contentCache)) {
-      result[src] = injectBaseTarget(html)
+      const sanitized = sanitizeHtml(html)
+      const withBaseTarget = injectBaseTarget(sanitized)
+      result[src] = injectCspMeta(withBaseTarget)
     }
     return result
   }, [contentCache])

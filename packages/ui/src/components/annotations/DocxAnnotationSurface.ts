@@ -1,26 +1,86 @@
 /**
- * DocxAnnotationSurface — extends HtmlAnnotationSurface with DOCX-specific
- * context extraction.
+ * DocxAnnotationSurface -- AnnotationSurface implementation for DOCX documents.
  *
  * DOCX files are rendered to HTML via docx-preview and displayed in a
- * sandboxed iframe, so all selection/highlight/rect behaviour is inherited
- * from HtmlAnnotationSurface. This subclass only overrides follow-up
- * context to tag the document as DOCX and extract section headings from
- * the rendered structure.
+ * sandboxed iframe. This surface uses COMPOSITION (not inheritance) over
+ * HtmlAnnotationSurface to avoid the kind-incompatibility problem:
+ * HtmlAnnotationSurface.kind is 'html' as const, which cannot be overridden
+ * to 'docx' via subclassing.
+ *
+ * All DOM selection/highlight/rect behaviour is delegated to an internal
+ * HtmlAnnotationSurface instance. This class overrides:
+ * - kind: 'docx'
+ * - captureSelection: patches scope.kind to 'docx'
+ * - getFollowUpContext: adds DOCX-specific context (documentType, fileName, sectionHeading)
  */
 
+import type { AnnotationV1 } from '@craft-agent/core'
 import { HtmlAnnotationSurface } from './HtmlAnnotationSurface'
-import type { FollowUpContext, SurfaceSelection } from './types'
+import type {
+  AnnotationSurface,
+  SurfaceSelection,
+  FollowUpContext,
+  ResolvedAnnotation,
+} from './types'
 
-export class DocxAnnotationSurface extends HtmlAnnotationSurface {
+export class DocxAnnotationSurface implements AnnotationSurface {
   readonly kind = 'docx' as const
 
-  constructor(iframe: HTMLIFrameElement, private docxFileName?: string) {
-    super(iframe, docxFileName)
+  private inner: HtmlAnnotationSurface
+  private iframe: HTMLIFrameElement
+  private docxFileName?: string
+
+  constructor(iframe: HTMLIFrameElement, docxFileName?: string) {
+    this.iframe = iframe
+    this.docxFileName = docxFileName
+    this.inner = new HtmlAnnotationSurface(iframe, docxFileName)
   }
 
-  override getFollowUpContext(sel: SurfaceSelection): FollowUpContext {
-    const baseContext = super.getFollowUpContext(sel)
+  captureSelection(): SurfaceSelection | null {
+    const sel = this.inner.captureSelection()
+    if (!sel) return null
+
+    // Patch scope kind from 'html' to 'docx'
+    return {
+      ...sel,
+      scope: { kind: 'docx' },
+    }
+  }
+
+  restoreSelection(sel: SurfaceSelection): void {
+    // Delegate with html scope so inner surface recognizes it
+    if (sel.scope.kind === 'docx') {
+      this.inner.restoreSelection({
+        ...sel,
+        scope: { kind: 'html' },
+      })
+    } else {
+      this.inner.restoreSelection(sel)
+    }
+  }
+
+  getSelectionRects(sel: SurfaceSelection): DOMRect[] {
+    // Delegate with html scope so inner surface recognizes it
+    if (sel.scope.kind === 'docx') {
+      return this.inner.getSelectionRects({
+        ...sel,
+        scope: { kind: 'html' },
+      })
+    }
+    return this.inner.getSelectionRects(sel)
+  }
+
+  resolveAnnotation(annotation: AnnotationV1): ResolvedAnnotation | null {
+    return this.inner.resolveAnnotation(annotation)
+  }
+
+  getFollowUpContext(sel: SurfaceSelection): FollowUpContext {
+    // Translate scope for the inner surface
+    const innerSel = sel.scope.kind === 'docx'
+      ? { ...sel, scope: { kind: 'html' as const } }
+      : sel
+    const baseContext = this.inner.getFollowUpContext(innerSel)
+
     return {
       ...baseContext,
       documentType: 'docx',
@@ -31,15 +91,23 @@ export class DocxAnnotationSurface extends HtmlAnnotationSurface {
     }
   }
 
+  setRenderedAnnotations(annotations: AnnotationV1[]): void {
+    this.inner.setRenderedAnnotations(annotations)
+  }
+
+  observeGeometryInvalidation(cb: () => void): () => void {
+    return this.inner.observeGeometryInvalidation(cb)
+  }
+
   /**
    * Walk up from the current selection in the iframe to find the nearest
-   * heading element. docx-preview renders Word headings as h1–h6 elements,
+   * heading element. docx-preview renders Word headings as h1-h6 elements,
    * so this extends the base HTML heading detection with DOCX-specific
    * structure awareness.
    */
   private extractDocxSectionHeading(): string | undefined {
     try {
-      const doc = (this as unknown as { iframe: HTMLIFrameElement }).iframe?.contentDocument
+      const doc = this.iframe?.contentDocument
       if (!doc) return undefined
 
       const selection = doc.getSelection()

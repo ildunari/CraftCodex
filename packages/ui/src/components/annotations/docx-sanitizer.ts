@@ -13,7 +13,45 @@
  * renderer) and server/test environments (bun test, Node).
  */
 
-import DOMPurify from 'isomorphic-dompurify'
+import DOMPurifyDefault from 'isomorphic-dompurify'
+
+/**
+ * Create a dedicated DOMPurify instance to avoid hook race conditions
+ * on the global singleton. isomorphic-dompurify's default export is a
+ * Proxy that acts both as the singleton AND as a factory: calling it
+ * with a Window argument returns a fresh, isolated DOMPurify instance.
+ *
+ * In browser/Electron: we use the real `window`.
+ * In Node/bun test: we create a JSDOM window.
+ *
+ * Fallback: if instance creation fails, use the singleton with try/finally
+ * around hook manipulation.
+ */
+let purify: typeof DOMPurifyDefault
+
+function createDedicatedInstance(): typeof DOMPurifyDefault | null {
+  const factory = DOMPurifyDefault as unknown as (win: unknown) => typeof DOMPurifyDefault
+  try {
+    // Browser environment
+    if (typeof window !== 'undefined' && window.document) {
+      const inst = factory(window)
+      if (typeof inst?.addHook === 'function') return inst
+    }
+  } catch { /* not in browser */ }
+
+  try {
+    // Node/test environment — use JSDOM
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { JSDOM } = require('jsdom')
+    const win = new JSDOM('').window
+    const inst = factory(win)
+    if (typeof inst?.addHook === 'function') return inst
+  } catch { /* jsdom not available */ }
+
+  return null
+}
+
+purify = createDedicatedInstance() ?? DOMPurifyDefault
 
 const ALLOWED_TAGS = [
   'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'br', 'strong', 'em',
@@ -37,8 +75,9 @@ export const DOCX_CSP_META =
  * into other DOMPurify consumers in the same process.
  */
 export function sanitizeDocxHtml(html: string): string {
-  // Hook: strip dangerous CSS properties from inline styles
-  DOMPurify.addHook('uponSanitizeAttribute', (_node, data) => {
+  // Hook: strip dangerous CSS properties from inline styles.
+  // Wrapped in try/finally so the hook is always removed even if sanitize throws.
+  purify.addHook('uponSanitizeAttribute', (_node, data) => {
     if (data.attrName === 'style') {
       data.attrValue = data.attrValue
         .replace(/position\s*:\s*(absolute|fixed)/gi, '')
@@ -47,15 +86,24 @@ export function sanitizeDocxHtml(html: string): string {
     }
   })
 
-  const clean = DOMPurify.sanitize(html, {
-    ALLOWED_TAGS,
-    ALLOWED_ATTR,
-    FORBID_TAGS,
-    ALLOW_DATA_ATTR: false,
-  })
+  try {
+    return purify.sanitize(html, {
+      ALLOWED_TAGS,
+      ALLOWED_ATTR,
+      FORBID_TAGS,
+      ALLOW_DATA_ATTR: false,
+    })
+  } finally {
+    purify.removeHook('uponSanitizeAttribute')
+  }
+}
 
-  DOMPurify.removeHook('uponSanitizeAttribute')
-  return clean
+/**
+ * Generic HTML sanitization using the same allowlist as DOCX.
+ * Suitable for any untrusted HTML content (email previews, HTML blocks, etc.).
+ */
+export function sanitizeHtml(html: string): string {
+  return sanitizeDocxHtml(html)
 }
 
 /**

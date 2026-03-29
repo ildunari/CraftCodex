@@ -22,6 +22,7 @@ import {
   extractIframeContext,
 } from './iframe-selection-bridge'
 import { annotationColorToCss, HIGHLIGHT_FALLBACK_COLOR } from './annotation-style-tokens'
+import { findQuoteOffset } from './find-quote-with-context'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -137,7 +138,7 @@ export class HtmlAnnotationSurface implements AnnotationSurface {
       return { rects: [], isValid: false, failureReason: 'quote-not-found' }
     }
 
-    const range = this.findTextRange(doc, quote.exact)
+    const range = this.findTextRangeWithContext(doc, quote.exact, quote.prefix, quote.suffix)
     if (!range) {
       return { rects: [], isValid: false, failureReason: 'quote-not-found' }
     }
@@ -192,7 +193,7 @@ export class HtmlAnnotationSurface implements AnnotationSurface {
       const quote = this.getQuoteSelector(annotation)
       if (!quote) continue
 
-      const range = this.findTextRange(doc, quote.exact)
+      const range = this.findTextRangeWithContext(doc, quote.exact, quote.prefix, quote.suffix)
       if (!range) continue
 
       const highlightId = `annotation-${annotation.id}`
@@ -428,6 +429,67 @@ export class HtmlAnnotationSurface implements AnnotationSurface {
     }
 
     const idx = fullText.indexOf(searchText)
+    if (idx === -1) return null
+
+    // Map character offset to text node + offset
+    let charCount = 0
+    let startNode: Text | null = null
+    let startOffset = 0
+    let endNode: Text | null = null
+    let endOffset = 0
+    const targetEnd = idx + searchText.length
+
+    for (const node of textNodes) {
+      const len = node.textContent?.length ?? 0
+
+      if (!startNode && charCount + len > idx) {
+        startNode = node
+        startOffset = idx - charCount
+      }
+
+      if (charCount + len >= targetEnd) {
+        endNode = node
+        endOffset = targetEnd - charCount
+        break
+      }
+
+      charCount += len
+    }
+
+    if (!startNode || !endNode) return null
+
+    try {
+      const range = doc.createRange()
+      range.setStart(startNode, startOffset)
+      range.setEnd(endNode, endOffset)
+      return range
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Find a Range using prefix/suffix context for disambiguation.
+   * Falls back to findTextRange (first occurrence) when no context is available.
+   */
+  private findTextRangeWithContext(
+    doc: Document,
+    searchText: string,
+    prefix?: string,
+    suffix?: string,
+  ): Range | null {
+    if (!searchText || !doc.body) return null
+
+    const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT)
+    const textNodes: Text[] = []
+    let fullText = ''
+
+    while (walker.nextNode()) {
+      textNodes.push(walker.currentNode as Text)
+      fullText += (walker.currentNode as Text).textContent ?? ''
+    }
+
+    const idx = findQuoteOffset(fullText, searchText, prefix, suffix)
     if (idx === -1) return null
 
     // Map character offset to text node + offset

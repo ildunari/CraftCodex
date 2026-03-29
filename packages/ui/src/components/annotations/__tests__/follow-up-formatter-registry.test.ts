@@ -13,7 +13,14 @@ describe('escapeMarkdown', () => {
     expect(escapeMarkdown('*bold*')).toBe('\\*bold\\*')
     expect(escapeMarkdown('_italic_')).toBe('\\_italic\\_')
     expect(escapeMarkdown('`code`')).toBe('\\`code\\`')
-    expect(escapeMarkdown('[link](url)')).toBe('\\[link\\](url)')
+    expect(escapeMarkdown('[link](url)')).toBe('\\[link\\]\\(url\\)')
+  })
+
+  it('escapes additional markdown metacharacters: ! ( ) - +', () => {
+    expect(escapeMarkdown('![alt](img.png)')).toBe('\\!\\[alt\\]\\(img.png\\)')
+    expect(escapeMarkdown('- list item')).toBe('\\- list item')
+    expect(escapeMarkdown('+ list item')).toBe('\\+ list item')
+    expect(escapeMarkdown('(parens)')).toBe('\\(parens\\)')
   })
 
   it('leaves normal text unchanged', () => {

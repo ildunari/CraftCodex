@@ -3,6 +3,7 @@ import type { AnnotationSurface, SurfaceKind } from './types'
 import { PdfAnnotationSurface } from './PdfAnnotationSurface'
 import { HtmlAnnotationSurface } from './HtmlAnnotationSurface'
 import { DocxAnnotationSurface } from './DocxAnnotationSurface'
+import { MarkdownAnnotationSurface } from './MarkdownAnnotationSurface'
 
 type SurfaceFactory = (...args: unknown[]) => AnnotationSurface
 
@@ -32,6 +33,12 @@ export function unregisterSurface(kind: SurfaceKind): boolean {
 // ---------------------------------------------------------------------------
 // Built-in registrations
 // ---------------------------------------------------------------------------
+
+// Register the Markdown surface factory.
+// Usage: createSurface('markdown', rootElement)
+registerSurface('markdown', (root) =>
+  new MarkdownAnnotationSurface(root as HTMLElement),
+)
 
 // Register the PDF surface factory.
 // Usage: createSurface('pdf', container, getPage, fileName?)
