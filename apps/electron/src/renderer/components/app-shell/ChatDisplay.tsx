@@ -55,6 +55,7 @@ import {
   isAnnotationFollowUpSent,
   extractAnnotationSelectedText,
   normalizeFollowUpText,
+  getFormatter,
   type Turn,
   type AssistantTurn,
   type UserTurn,
@@ -218,6 +219,15 @@ type PendingFollowUpAnnotation = {
   createdAt: number
   color?: string
   meta?: Record<string, unknown>
+  // Surface-aware fields (populated from annotation.meta.document when present)
+  sourceType?: 'markdown' | 'pdf' | 'docx' | 'html' | 'pptx'
+  sourceFile?: string
+  pageOrSlide?: number
+  sectionHeading?: string
+  surroundingText?: string
+  quotePrefix?: string
+  quoteSuffix?: string
+  attachmentId?: string
 }
 
 function normalizeExcerptForMessage(text: string, maxLength = 280): string {
@@ -235,11 +245,22 @@ function formatFollowUpSection(
   const includeTopSeparator = options?.includeTopSeparator ?? true
 
   const items = followUps.map((followUp, idx) => {
-    const quoteText = normalizeExcerptForMessage(followUp.selectedText)
-    return [
-      `> [#${idx + 1}] ${quoteText}`,
-      `→ ${followUp.note}`,
-    ].join('\n')
+    const formatter = getFormatter(followUp.sourceType ?? 'markdown')
+    const context = {
+      fileName: followUp.sourceFile,
+      pageOrSlide: followUp.pageOrSlide,
+      sectionHeading: followUp.sectionHeading,
+      surroundingText: followUp.surroundingText ?? '',
+      documentType: followUp.sourceType ?? 'markdown',
+    }
+    const rawQuote = normalizeExcerptForMessage(followUp.selectedText)
+    const formattedQuote = formatter.formatQuote(rawQuote, context)
+    const attribution = formatter.formatAttribution(context)
+
+    const lines = [`> [#${idx + 1}] ${formattedQuote}`]
+    if (attribution) lines.push(`> ${attribution}`)
+    lines.push(`→ ${followUp.note}`)
+    return lines.join('\n')
   })
 
   const body = ['**Follow-ups**', items.join('\n\n---\n\n')].join('\n\n')
@@ -1245,6 +1266,9 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
         if (!note) continue
         if (isAnnotationFollowUpSent(annotation)) continue
 
+        const metaRecord = asRecord(annotation.meta) ?? undefined
+        const docMeta = metaRecord?.document as Record<string, unknown> | undefined
+
         pending.push({
           messageId: message.id,
           annotationId: annotation.id,
@@ -1252,7 +1276,11 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
           selectedText: extractAnnotationSelectedText(annotation, message.content),
           createdAt: annotation.updatedAt ?? annotation.createdAt,
           color: annotation.style?.color,
-          meta: asRecord(annotation.meta) ?? undefined,
+          meta: metaRecord,
+          sourceType: (docMeta?.kind as PendingFollowUpAnnotation['sourceType']) ?? 'markdown',
+          sourceFile: metaRecord?.attachmentId as string | undefined,
+          pageOrSlide: (docMeta?.page as number | undefined) ?? (docMeta?.slide as number | undefined),
+          sectionHeading: (docMeta?.sectionPath as string[] | undefined)?.[0],
         })
       }
     }
