@@ -14,6 +14,7 @@ import {
 } from './annotation-core'
 import { restoreDomSelectionFromOffsets } from './selection-restore'
 import { resolveTextAnnotations } from '../markdown/annotation-resolver'
+import { clearAnnotationMarks, applyTextHighlightRange } from './highlight-dom-mutations'
 
 /**
  * AnnotationSurface implementation for markdown-rendered text in TurnCard.
@@ -24,8 +25,11 @@ import { resolveTextAnnotations } from '../markdown/annotation-resolver'
  */
 export class MarkdownAnnotationSurface implements AnnotationSurface {
   readonly kind = 'markdown' as const
+  readonly rootElement: HTMLElement
 
-  constructor(private root: HTMLElement) {}
+  constructor(private root: HTMLElement) {
+    this.rootElement = root
+  }
 
   captureSelection(): SurfaceSelection | null {
     let selection: Selection | null = null
@@ -98,7 +102,7 @@ export class MarkdownAnnotationSurface implements AnnotationSurface {
       return { rects: [], isValid: false, failureReason: 'quote-not-found' }
     }
 
-    const rects = getClientRectsForOffsets(this.root, resolved.start, resolved.end)
+    const rects = getClientRectsForOffsets(this.root, resolved.range.start, resolved.range.end)
     return { rects, isValid: true }
   }
 
@@ -123,9 +127,29 @@ export class MarkdownAnnotationSurface implements AnnotationSurface {
     }
   }
 
-  setRenderedAnnotations(_annotations: AnnotationV1[]): void {
-    // Will be wired in Task 0.6/0.7 when highlight-dom-mutations is extracted.
-    // For now this is a no-op — highlights are still managed by TurnCard directly.
+  setRenderedAnnotations(annotations: AnnotationV1[]): void {
+    const root = this.root
+    if (!root) return
+
+    clearAnnotationMarks(root)
+
+    if (annotations.length === 0) return
+
+    let canonical: string
+    try {
+      canonical = getCanonicalText(root)
+    } catch {
+      return
+    }
+    if (!canonical) return
+
+    const resolution = resolveTextAnnotations(canonical, annotations)
+
+    for (const item of resolution.resolved) {
+      // Build a stable 1-based index from the original annotation order
+      const index = annotations.indexOf(item.annotation)
+      applyTextHighlightRange(root, item.range, item.annotation, index >= 0 ? index + 1 : undefined)
+    }
   }
 
   observeGeometryInvalidation(cb: () => void): () => void {

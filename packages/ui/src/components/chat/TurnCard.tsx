@@ -42,18 +42,15 @@ import {
   getAnnotationNoteText,
 } from '../annotations/follow-up-state'
 import {
-  ANNOTATION_PREFIX_SUFFIX_WINDOW,
   SELECTION_POINTER_MAX_AGE_MS,
   clamp,
   hasExistingTextRangeAnnotation,
   createSelectionPreviewAnnotation,
   createTextSelectionAnnotation,
-  getCanonicalText,
-  resolveNodeOffset,
   type AnnotationOverlayRect,
 } from '../annotations/annotation-core'
 import { clearBlockAnnotationMarkers, applyBlockAnnotationMarker } from '../annotations/block-markers'
-import { clearAnnotationMarks, applyTextHighlightRange } from '../annotations/highlight-dom-mutations'
+import { clearAnnotationMarks } from '../annotations/highlight-dom-mutations'
 import { canAnnotateMessage, shouldRenderAnnotationIslandInPortal } from '../annotations/annotation-host-config'
 import { clearDomSelection } from '../annotations/selection-restore'
 import {
@@ -74,6 +71,7 @@ import { useAnnotationInteractionController } from '../annotations/use-annotatio
 import { useAnnotationIslandPresentation } from '../annotations/use-annotation-island-presentation'
 import { useAnnotationIslandEvents } from '../annotations/use-annotation-island-events'
 import { useAnnotationCancelRestore } from '../annotations/use-annotation-cancel-restore'
+import { MarkdownAnnotationSurface } from '../annotations/MarkdownAnnotationSurface'
 import { DocumentFormattedMarkdownOverlay } from '../overlay'
 import { AcceptPlanDropdown } from './AcceptPlanDropdown'
 import {
@@ -1542,9 +1540,24 @@ export function ResponseCard({
   const [annotationOverlay, setAnnotationOverlay] = useState<{ rects: AnnotationOverlayRect[]; chips: AnnotationOverlayChip[] }>({ rects: [], chips: [] })
   const contentRef = useRef<HTMLDivElement>(null)
   const contentLayerRef = useRef<HTMLDivElement>(null)
+  const surfaceRef = useRef<MarkdownAnnotationSurface | null>(null)
   const lastPointerRef = useRef<PointerSnapshot | null>(null)
   const dragStartPointerRef = useRef<PointerSnapshot | null>(null)
   const selectionStartedInContentRef = useRef(false)
+
+  /** Lazily create or retrieve the MarkdownAnnotationSurface for the content root. */
+  const getSurface = useCallback((): MarkdownAnnotationSurface | null => {
+    const root = contentLayerRef.current
+    if (!root) {
+      surfaceRef.current = null
+      return null
+    }
+    // Re-create if root element changed (unlikely but defensive)
+    if (!surfaceRef.current || surfaceRef.current.rootElement !== root) {
+      surfaceRef.current = new MarkdownAnnotationSurface(root)
+    }
+    return surfaceRef.current
+  }, [])
 
   const canAnnotate = canAnnotateMessage({
     hasAddAnnotationHandler: !!onAddAnnotation,
@@ -1642,6 +1655,7 @@ export function ResponseCard({
   }, [activeAnnotationDetail, activeAnnotation, closeSelectionMenu])
 
   useEffect(() => {
+    const surface = getSurface()
     const root = contentLayerRef.current
     if (!root) {
       setAnnotationOverlay({ rects: [], chips: [] })
@@ -1649,7 +1663,12 @@ export function ResponseCard({
     }
 
     const recomputeOverlay = () => {
-      clearAnnotationMarks(root)
+      // Delegate text highlight DOM mutations to the surface
+      if (surface) {
+        surface.setRenderedAnnotations(renderedAnnotations)
+      } else {
+        clearAnnotationMarks(root)
+      }
       clearBlockAnnotationMarkers(root)
 
       if (!renderedAnnotations.length) {
@@ -1679,11 +1698,19 @@ export function ResponseCard({
     }
 
     recomputeOverlay()
+
+    // Use surface geometry invalidation observer (resize + scroll + ResizeObserver)
+    // instead of just window resize
+    if (surface) {
+      return surface.observeGeometryInvalidation(recomputeOverlay)
+    }
+
+    // Fallback if surface unavailable
     window.addEventListener('resize', recomputeOverlay)
     return () => {
       window.removeEventListener('resize', recomputeOverlay)
     }
-  }, [annotations, renderedAnnotations, text, displayedText, isStreaming])
+  }, [annotations, renderedAnnotations, text, displayedText, isStreaming, getSurface])
 
   useEffect(() => {
     if (!canAnnotate) {
@@ -1937,47 +1964,35 @@ export function ResponseCard({
   }, [])
 
   const showSelectionMenuFromCurrentSelection = useCallback(() => {
-    const root = contentLayerRef.current
-    if (!root) return
+    const surface = getSurface()
+    if (!surface) return
 
     requestAnimationFrame(() => {
-      const selection = window.getSelection()
-      if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+      // Delegate text selection capture to the surface
+      const captured = surface.captureSelection()
+      if (!captured || captured.scope.kind !== 'markdown') {
         closeSelectionMenu()
         return
       }
 
-      const range = selection.getRangeAt(0)
-      if (!root.contains(range.commonAncestorContainer)) {
-        closeSelectionMenu()
-        return
-      }
-
-      const start = resolveNodeOffset(root, range.startContainer, range.startOffset)
-      const end = resolveNodeOffset(root, range.endContainer, range.endOffset)
-      if (start == null || end == null || end <= start) {
-        closeSelectionMenu()
-        return
-      }
-
-      const selectedText = range.toString()
-      if (!selectedText || !/\S/.test(selectedText)) {
-        closeSelectionMenu()
-        return
-      }
+      const { start, end } = captured.scope
+      const { selectedText, prefix, suffix } = captured
 
       if (hasExistingTextRangeAnnotation(annotations, start, end)) {
         closeSelectionMenu()
         return
       }
 
-      const fullText = getCanonicalText(root)
-      const prefix = fullText.slice(Math.max(0, start - ANNOTATION_PREFIX_SUFFIX_WINDOW), start)
-      const suffix = fullText.slice(end, end + ANNOTATION_PREFIX_SUFFIX_WINDOW)
+      // Anchor rect computation remains in TurnCard — it's UI positioning
+      // logic that depends on pointer state, not annotation domain logic.
+      const selection = window.getSelection()
+      const range = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null
 
       // Prefer fragmented client rects over union bounds for wrapped selections.
       // The union rect often produces an x-axis anchor that feels detached.
-      const rects = Array.from(range.getClientRects()).filter(rect => rect.width > 0 && rect.height > 0)
+      const rects = range
+        ? Array.from(range.getClientRects()).filter(rect => rect.width > 0 && rect.height > 0)
+        : []
       const pointer = lastPointerRef.current
       const hasRecentPointer = Boolean(pointer && (Date.now() - pointer.ts) <= SELECTION_POINTER_MAX_AGE_MS)
       const pointerX = hasRecentPointer && pointer ? pointer.x : null
@@ -2013,8 +2028,11 @@ export function ResponseCard({
         } else {
           anchorRect = rects.reduce((best, rect) => (rect.top < best.top ? rect : best))
         }
-      } else {
+      } else if (range) {
         anchorRect = range.getBoundingClientRect()
+      } else {
+        closeSelectionMenu()
+        return
       }
 
       const anchorRowRects = rects.length > 0
@@ -2047,7 +2065,7 @@ export function ResponseCard({
       })
       dragStartPointerRef.current = null
     })
-  }, [annotations, closeSelectionMenu, triggerSelectionMenuEntryReplay, openFromSelection])
+  }, [annotations, closeSelectionMenu, getSurface, triggerSelectionMenuEntryReplay, openFromSelection])
 
   const handleTextSelection = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
     if (!canAnnotate || !onAddAnnotation || !messageId) return
