@@ -23,34 +23,9 @@ import { ItemNavigator } from './ItemNavigator'
 import { AnnotationIslandMenu } from '../annotations/AnnotationIslandMenu'
 import { AnnotationOverlayLayer } from '../annotations/AnnotationOverlayLayer'
 import { PdfAnnotationSurface } from '../annotations/PdfAnnotationSurface'
-import { useAnnotationInteractionController } from '../annotations/use-annotation-interaction-controller'
-import { useAnnotationIslandPresentation } from '../annotations/use-annotation-island-presentation'
-import { useAnnotationIslandEvents } from '../annotations/use-annotation-island-events'
-import { useAnnotationCancelRestore } from '../annotations/use-annotation-cancel-restore'
-import {
-  getAnnotationInteractionAnchor,
-  getAnnotationInteractionSourceKey,
-  hasAnnotationInteraction,
-} from '../annotations/interaction-selectors'
-import {
-  type PointerSnapshot,
-  buildSelectionEntryTransition,
-  buildAnnotationChipEntryTransition,
-} from '../annotations/island-motion'
-import {
-  getAnnotationNoteText,
-  formatAnnotationFollowUpTooltipText,
-} from '../annotations/follow-up-state'
-import { formatCopyAsQuote } from '../annotations/follow-up-formatter-registry'
-import {
-  SELECTION_POINTER_MAX_AGE_MS,
-  clamp,
-  createTextSelectionAnnotation,
-  type AnnotationOverlayRect,
-} from '../annotations/annotation-core'
-import { clearDomSelection } from '../annotations/selection-restore'
+import { usePreviewAnnotationInteraction } from '../annotations/use-preview-annotation-interaction'
+import type { PointerSnapshot } from '../annotations/island-motion'
 import { shouldIgnoreSelectionMouseUpTarget } from '../annotations/interaction-policy'
-import type { IslandTransitionConfig } from '../ui'
 import 'react-pdf/dist/Page/AnnotationLayer.css'
 import 'react-pdf/dist/Page/TextLayer.css'
 
@@ -125,57 +100,6 @@ export function PDFPreviewOverlay({
   const pdfContentRef = useRef<HTMLDivElement>(null)
   const pdfDocRef = useRef<PDFDocumentProxy | null>(null)
   const surfaceRef = useRef<PdfAnnotationSurface | null>(null)
-  const lastPointerRef = useRef<PointerSnapshot | null>(null)
-  const dragStartPointerRef = useRef<PointerSnapshot | null>(null)
-
-  // ---------------------------------------------------------------------------
-  // Annotation interaction state
-  // ---------------------------------------------------------------------------
-
-  const canAnnotate = Boolean(onAddAnnotation)
-
-  const interaction = useAnnotationInteractionController()
-  const {
-    state: interactionState,
-    setDraft: setFollowUpDraft,
-    openFromSelection,
-    openFollowUpFromSelection,
-    openFromAnnotation,
-    requestEdit,
-    cancelFollowUp,
-    closeAll,
-    markSubmitSuccess,
-    markDeleteSuccess,
-  } = interaction
-
-  const pendingSelection = interactionState.pendingSelection
-  const selectionMenuView = interactionState.selectionMenuView
-  const followUpDraft = interactionState.followUpDraft
-  const followUpMode = interactionState.followUpMode
-  const activeAnnotationDetail = interactionState.activeAnnotationDetail
-
-  const [selectionMenuShowNonce, setSelectionMenuShowNonce] = useState(0)
-  const [selectionMenuTransitionConfig, setSelectionMenuTransitionConfig] = useState<IslandTransitionConfig>(
-    buildAnnotationChipEntryTransition()
-  )
-
-  // Annotation overlay rects for highlight rendering
-  const [annotationOverlayRects, setAnnotationOverlayRects] = useState<AnnotationOverlayRect[]>([])
-
-  // Island presentation (anchor, visibility, exit animation)
-  const selectionMenuAnchor = getAnnotationInteractionAnchor(interactionState)
-  const selectionMenuSourceKey = getAnnotationInteractionSourceKey(interactionState, `pdf:${activeItem?.src}`)
-
-  const {
-    renderAnchor: selectionMenuRenderAnchor,
-    renderSourceKey: selectionMenuRenderSourceKey,
-    isVisible: isSelectionMenuVisible,
-    openedAtRef: selectionMenuOpenedAtRef,
-    handleExitComplete: handleSelectionMenuExitComplete,
-  } = useAnnotationIslandPresentation({
-    anchor: selectionMenuAnchor,
-    sourceKey: selectionMenuSourceKey,
-  })
 
   // ---------------------------------------------------------------------------
   // Surface management
@@ -198,23 +122,116 @@ export function PDFPreviewOverlay({
   }, [activeItem?.src, activeItem?.label])
 
   // ---------------------------------------------------------------------------
-  // Close / cleanup
+  // Annotation interaction (shared hook)
   // ---------------------------------------------------------------------------
 
-  const closeSelectionMenu = useCallback(() => {
-    closeAll()
-  }, [closeAll])
+  const buildDocumentMeta = useCallback(() => {
+    const surface = getSurface()
+    const captured = surface?.captureSelection()
+    const pageNumber = captured?.scope.kind === 'pdf' ? (captured.scope as { pageNumber?: number }).pageNumber : undefined
 
-  const isTargetInsideAnnotationIsland = useCallback((target: Node | null): boolean => {
-    if (!target) return false
-    const element = target instanceof Element ? target : target.parentElement
-    if (!element) return false
-    return !!element.closest('[data-ca-annotation-island="true"]')
+    return {
+      kind: 'pdf',
+      title: (activeItem?.label || activeItem?.src?.split('/').pop()) ?? undefined,
+      page: pageNumber ?? 1,
+    }
+  }, [getSurface, activeItem?.label, activeItem?.src])
+
+  const onEmptyCapture = useCallback(() => {
+    // Check if we're on a page without text layer (scanned page)
+    const sel = window.getSelection()
+    if (sel && sel.rangeCount > 0) {
+      const range = sel.getRangeAt(0)
+      const pageEl = (range.startContainer.nodeType === Node.ELEMENT_NODE
+        ? range.startContainer as HTMLElement
+        : range.startContainer.parentElement
+      )?.closest('.react-pdf__Page')
+
+      if (pageEl) {
+        const textLayer = pageEl.querySelector('.react-pdf__Page__textContent')
+        if (!textLayer || !textLayer.textContent?.trim()) {
+          onToast?.('Text selection unavailable for this page')
+        }
+      }
+    }
+  }, [onToast])
+
+  const getSelectionAnchorRects = useCallback(() => {
+    const selection = window.getSelection()
+    const range = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null
+    return range
+      ? Array.from(range.getClientRects()).filter(r => r.width > 0 && r.height > 0)
+      : []
   }, [])
 
-  const triggerSelectionMenuEntryReplay = useCallback(() => {
-    setSelectionMenuShowNonce((prev) => prev + 1)
-  }, [])
+  const annotationInteraction = usePreviewAnnotationInteraction({
+    isOpen,
+    onAddAnnotation,
+    onRemoveAnnotation,
+    annotations,
+    sourceId: `pdf:${activeItem?.src || filePath}`,
+    sourceKeySegment: `pdf:${activeItem?.src}`,
+    sessionId,
+    sendMessageKey,
+    contentRootRef: pdfContentRef,
+    getSurface,
+    buildDocumentMeta,
+    expectedScopeKind: 'pdf',
+    getSelectionAnchorRects,
+    onEmptyCapture,
+    overlayRectDeps: [numPages],
+  })
+
+  const {
+    canAnnotate,
+    handleSelectionPointerDown,
+    showSelectionMenuFromCurrentSelection,
+    closeSelectionMenu,
+    annotationOverlayRects,
+    islandMenuProps,
+    overlayLayerProps,
+  } = annotationInteraction
+
+  // ---------------------------------------------------------------------------
+  // PDF-specific: cross-page selection detection on mouseup
+  // ---------------------------------------------------------------------------
+
+  const handleTextSelection = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    if (!canAnnotate) return
+    if (shouldIgnoreSelectionMouseUpTarget(event.target)) return
+
+    annotationInteraction.lastPointerRef.current = {
+      x: event.clientX,
+      y: event.clientY,
+      ts: Date.now(),
+    } satisfies PointerSnapshot
+
+    // Detect cross-page selection
+    const sel = window.getSelection()
+    if (sel && sel.rangeCount > 0) {
+      const range = sel.getRangeAt(0)
+      const startPage = (range.startContainer.nodeType === Node.ELEMENT_NODE
+        ? range.startContainer as HTMLElement
+        : range.startContainer.parentElement
+      )?.closest('.react-pdf__Page')
+      const endPage = (range.endContainer.nodeType === Node.ELEMENT_NODE
+        ? range.endContainer as HTMLElement
+        : range.endContainer.parentElement
+      )?.closest('.react-pdf__Page')
+
+      if (startPage && endPage && startPage !== endPage) {
+        onToast?.('Select text within a single page')
+        closeSelectionMenu()
+        return
+      }
+    }
+
+    showSelectionMenuFromCurrentSelection()
+  }, [canAnnotate, annotationInteraction.lastPointerRef, showSelectionMenuFromCurrentSelection, closeSelectionMenu, onToast])
+
+  // ---------------------------------------------------------------------------
+  // Close / cleanup
+  // ---------------------------------------------------------------------------
 
   // Reset annotation state when overlay closes or active item changes
   useEffect(() => {
@@ -275,171 +292,6 @@ export function PDFPreviewOverlay({
     [pdfData]
   )
 
-  // ---------------------------------------------------------------------------
-  // Annotation overlay geometry
-  // ---------------------------------------------------------------------------
-
-  useEffect(() => {
-    if (!annotations?.length || !pdfContentRef.current) {
-      setAnnotationOverlayRects([])
-      return
-    }
-
-    const surface = getSurface()
-    if (!surface) {
-      setAnnotationOverlayRects([])
-      return
-    }
-
-    const containerRect = pdfContentRef.current.getBoundingClientRect()
-    const rects: AnnotationOverlayRect[] = []
-
-    for (const annotation of annotations) {
-      const resolved = surface.resolveAnnotation(annotation)
-      if (!resolved?.isValid || resolved.rects.length === 0) continue
-
-      for (const rect of resolved.rects) {
-        rects.push({
-          id: annotation.id,
-          left: rect.left - containerRect.left,
-          top: rect.top - containerRect.top,
-          width: rect.width,
-          height: rect.height,
-          color: (annotation.style as Record<string, string> | undefined)?.color ?? 'yellow',
-        })
-      }
-    }
-
-    setAnnotationOverlayRects(rects)
-  }, [annotations, numPages, getSurface])
-
-  // ---------------------------------------------------------------------------
-  // Selection handling
-  // ---------------------------------------------------------------------------
-
-  const handleSelectionPointerDown = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
-    const snapshot: PointerSnapshot = {
-      x: event.clientX,
-      y: event.clientY,
-      ts: Date.now(),
-    }
-    dragStartPointerRef.current = snapshot
-    lastPointerRef.current = snapshot
-  }, [])
-
-  const showSelectionMenuFromCurrentSelection = useCallback(() => {
-    if (!canAnnotate) return
-
-    const surface = getSurface()
-    if (!surface) return
-
-    requestAnimationFrame(() => {
-      const captured = surface.captureSelection()
-
-      if (!captured) {
-        // Check if we're on a page without text layer (scanned page)
-        const sel = window.getSelection()
-        if (sel && sel.rangeCount > 0) {
-          const range = sel.getRangeAt(0)
-          const pageEl = (range.startContainer.nodeType === Node.ELEMENT_NODE
-            ? range.startContainer as HTMLElement
-            : range.startContainer.parentElement
-          )?.closest('.react-pdf__Page')
-
-          if (pageEl) {
-            const textLayer = pageEl.querySelector('.react-pdf__Page__textContent')
-            if (!textLayer || !textLayer.textContent?.trim()) {
-              onToast?.('Text selection unavailable for this page')
-            }
-          }
-        }
-
-        closeSelectionMenu()
-        return
-      }
-
-      if (captured.scope.kind !== 'pdf') {
-        closeSelectionMenu()
-        return
-      }
-
-      // Compute anchor position from browser selection rects
-      const selection = window.getSelection()
-      const range = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null
-      const rects = range
-        ? Array.from(range.getClientRects()).filter(r => r.width > 0 && r.height > 0)
-        : []
-
-      const pointer = lastPointerRef.current
-      const hasRecentPointer = Boolean(pointer && (Date.now() - pointer.ts) <= SELECTION_POINTER_MAX_AGE_MS)
-      const pointerX = hasRecentPointer && pointer ? pointer.x : null
-
-      let anchorRect: DOMRect
-      if (rects.length > 0) {
-        anchorRect = rects.reduce((best, rect) => (rect.top < best.top ? rect : best))
-      } else if (range) {
-        anchorRect = range.getBoundingClientRect()
-      } else {
-        closeSelectionMenu()
-        return
-      }
-
-      const anchorX = pointerX != null
-        ? clamp(pointerX, anchorRect.left, anchorRect.right)
-        : (anchorRect.left + anchorRect.width / 2)
-      const anchorY = anchorRect.top - 8
-
-      const transition = buildSelectionEntryTransition(dragStartPointerRef.current, pointer)
-      setSelectionMenuTransitionConfig(transition)
-      triggerSelectionMenuEntryReplay()
-
-      openFromSelection({
-        start: 0, // PDF selections use quote-based anchoring, not offsets
-        end: 0,
-        selectedText: captured.selectedText,
-        prefix: captured.prefix,
-        suffix: captured.suffix,
-        anchorX,
-        anchorY,
-      })
-      dragStartPointerRef.current = null
-    })
-  }, [canAnnotate, getSurface, closeSelectionMenu, triggerSelectionMenuEntryReplay, openFromSelection, onToast])
-
-  const handleTextSelection = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
-    if (!canAnnotate) return
-
-    if (shouldIgnoreSelectionMouseUpTarget(event.target)) return
-
-    lastPointerRef.current = {
-      x: event.clientX,
-      y: event.clientY,
-      ts: Date.now(),
-    }
-
-    // Detect cross-page selection
-    const sel = window.getSelection()
-    if (sel && sel.rangeCount > 0) {
-      const range = sel.getRangeAt(0)
-      const startPage = (range.startContainer.nodeType === Node.ELEMENT_NODE
-        ? range.startContainer as HTMLElement
-        : range.startContainer.parentElement
-      )?.closest('.react-pdf__Page')
-      const endPage = (range.endContainer.nodeType === Node.ELEMENT_NODE
-        ? range.endContainer as HTMLElement
-        : range.endContainer.parentElement
-      )?.closest('.react-pdf__Page')
-
-      if (startPage && endPage && startPage !== endPage) {
-        onToast?.('Select text within a single page')
-        closeSelectionMenu()
-        return
-      }
-    }
-
-    showSelectionMenuFromCurrentSelection()
-  }, [canAnnotate, showSelectionMenuFromCurrentSelection, closeSelectionMenu, onToast])
-
   // Handle mouseup outside PDF content (drag started inside, ended outside)
   useEffect(() => {
     if (!canAnnotate || !isOpen) return
@@ -459,142 +311,6 @@ export function PDFPreviewOverlay({
       document.removeEventListener('mouseup', handleDocumentMouseUp)
     }
   }, [canAnnotate, isOpen, showSelectionMenuFromCurrentSelection])
-
-  // ---------------------------------------------------------------------------
-  // Annotation handlers (highlight, follow-up, copy-as-quote)
-  // ---------------------------------------------------------------------------
-
-  const saveAnnotation = useCallback(async (note: string) => {
-    if (!pendingSelection || !onAddAnnotation) return
-
-    const annotation = createTextSelectionAnnotation(
-      `pdf:${activeItem?.src || filePath}`,
-      {
-        start: pendingSelection.start,
-        end: pendingSelection.end,
-        selectedText: pendingSelection.selectedText,
-        prefix: pendingSelection.prefix,
-        suffix: pendingSelection.suffix,
-      },
-      note || undefined,
-      sessionId,
-    )
-
-    // Attach PDF-specific document metadata
-    const surface = getSurface()
-    const captured = surface?.captureSelection()
-    const pageNumber = captured?.scope.kind === 'pdf' ? captured.scope.pageNumber : undefined
-
-    ;(annotation as AnnotationV1 & { meta: Record<string, unknown> }).meta = {
-      ...annotation.meta,
-      document: {
-        kind: 'pdf',
-        title: (activeItem?.label || activeItem?.src?.split('/').pop()) ?? undefined,
-        page: pageNumber ?? 1,
-      },
-    }
-
-    onAddAnnotation(annotation)
-    clearDomSelection()
-    markSubmitSuccess()
-  }, [pendingSelection, onAddAnnotation, activeItem, filePath, sessionId, getSurface, markSubmitSuccess])
-
-  const handleHighlight = useCallback(() => {
-    if (!pendingSelection) return
-    void saveAnnotation('')
-  }, [pendingSelection, saveAnnotation])
-
-  const handleOpenFollowUpView = useCallback(() => {
-    if (!pendingSelection) return
-    clearDomSelection()
-    openFollowUpFromSelection()
-  }, [pendingSelection, openFollowUpFromSelection])
-
-  const handleRequestFollowUpEdit = useCallback(() => {
-    requestEdit()
-  }, [requestEdit])
-
-  const handleSubmitFollowUp = useCallback((note: string) => {
-    void saveAnnotation(note)
-  }, [saveAnnotation])
-
-  const handleCopyAsQuote = useCallback(async () => {
-    if (!pendingSelection) return
-
-    const surface = getSurface()
-    const context = surface
-      ? surface.getFollowUpContext({
-          selectedText: pendingSelection.selectedText,
-          prefix: pendingSelection.prefix,
-          suffix: pendingSelection.suffix,
-          scope: { kind: 'pdf', pageNumber: 1 },
-        })
-      : { surroundingText: pendingSelection.selectedText, documentType: 'pdf' }
-
-    try {
-      await navigator.clipboard.writeText(formatCopyAsQuote(pendingSelection.selectedText, context))
-    } catch {
-      // Clipboard API may be blocked
-    }
-
-    clearDomSelection()
-    closeSelectionMenu()
-  }, [pendingSelection, getSurface, closeSelectionMenu])
-
-  const handleCancelFollowUp = useAnnotationCancelRestore({
-    contentRootRef: pdfContentRef,
-    cancelFollowUp,
-  })
-
-  const handleDeleteActiveAnnotation = useCallback(() => {
-    if (!onRemoveAnnotation || !activeAnnotationDetail) return
-    onRemoveAnnotation(activeAnnotationDetail.annotationId)
-    markDeleteSuccess()
-  }, [onRemoveAnnotation, activeAnnotationDetail, markDeleteSuccess])
-
-  const handleSelectionMenuRequestBack = useCallback((): boolean => {
-    if (selectionMenuView !== 'compact') {
-      handleCancelFollowUp()
-      return true
-    }
-    return false
-  }, [selectionMenuView, handleCancelFollowUp])
-
-  // ---------------------------------------------------------------------------
-  // Island events (outside click, scroll dismiss)
-  // ---------------------------------------------------------------------------
-
-  useAnnotationIslandEvents({
-    enabled: canAnnotate && hasAnnotationInteraction(interactionState) && isSelectionMenuVisible,
-    openedAtRef: selectionMenuOpenedAtRef,
-    isCompactView: selectionMenuView === 'compact',
-    isTargetInsideAnnotationIsland,
-    onBack: handleSelectionMenuRequestBack,
-    onClose: closeSelectionMenu,
-  })
-
-  // ---------------------------------------------------------------------------
-  // Annotation chip interaction (clicking existing highlights)
-  // ---------------------------------------------------------------------------
-
-  const handleOpenAnnotationDetail = useCallback((
-    annotationId: string,
-    index: number,
-    anchorX: number,
-    anchorY: number,
-    mode: 'view' | 'edit',
-  ) => {
-    if (!annotations?.length) return
-
-    const annotation = annotations.find(a => a.id === annotationId)
-    if (!annotation) return
-
-    const noteText = getAnnotationNoteText(annotation)
-    const transition = buildAnnotationChipEntryTransition()
-    setSelectionMenuTransitionConfig(transition)
-    triggerSelectionMenuEntryReplay()
-    openFromAnnotation({ annotationId, index, anchorX, anchorY }, noteText, mode)
-  }, [annotations, triggerSelectionMenuEntryReplay, openFromAnnotation])
 
   // Header actions: item navigation + copy button
   const headerActions = (
@@ -648,43 +364,13 @@ export function PDFPreviewOverlay({
 
         {/* Annotation highlight overlay */}
         {annotationOverlayRects.length > 0 && (
-          <AnnotationOverlayLayer
-            rects={annotationOverlayRects}
-            chips={[]}
-            annotations={annotations ?? []}
-            getTooltipText={(annotation) => formatAnnotationFollowUpTooltipText(annotation)}
-            allowChipOpen={canAnnotate}
-            onChipOpen={({ annotationId, index, anchorX, anchorY, mode }) => {
-              handleOpenAnnotationDetail(annotationId, index, anchorX, anchorY, mode)
-            }}
-          />
+          <AnnotationOverlayLayer {...overlayLayerProps} />
         )}
       </div>
 
       {/* Annotation Island Menu */}
       {canAnnotate && (
-        <AnnotationIslandMenu
-          anchor={selectionMenuRenderAnchor}
-          sourceKey={selectionMenuRenderSourceKey}
-          replayNonce={selectionMenuShowNonce}
-          isVisible={isSelectionMenuVisible}
-          activeView={selectionMenuView}
-          mode={followUpMode}
-          draft={followUpDraft}
-          onDraftChange={setFollowUpDraft}
-          onOpenFollowUp={handleOpenFollowUpView}
-          onHighlight={handleHighlight}
-          onCopyAsQuote={handleCopyAsQuote}
-          onCancel={handleCancelFollowUp}
-          onRequestBack={handleSelectionMenuRequestBack}
-          onRequestEdit={handleRequestFollowUpEdit}
-          onSubmit={handleSubmitFollowUp}
-          onDelete={activeAnnotationDetail ? handleDeleteActiveAnnotation : undefined}
-          sendMessageKey={sendMessageKey}
-          transitionConfig={selectionMenuTransitionConfig}
-          onExitComplete={handleSelectionMenuExitComplete}
-          usePortal={false}
-        />
+        <AnnotationIslandMenu {...islandMenuProps} />
       )}
     </PreviewOverlay>
   )
