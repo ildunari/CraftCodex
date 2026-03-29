@@ -1567,6 +1567,21 @@ export function ResponseCard({
   })
   const allowAnnotationIsland = annotationInteractionMode === 'interactive'
 
+  // Bound annotation callbacks that close over messageId so child blocks
+  // (MarkdownHtmlBlock, MarkdownPdfBlock, MarkdownDocxBlock) don't need it.
+  const boundAddAnnotation = React.useMemo(
+    () => onAddAnnotation && messageId ? (annotation: AnnotationV1) => onAddAnnotation(messageId, annotation) : undefined,
+    [onAddAnnotation, messageId],
+  )
+  const boundRemoveAnnotation = React.useMemo(
+    () => onRemoveAnnotation && messageId ? (annotationId: string) => onRemoveAnnotation(messageId, annotationId) : undefined,
+    [onRemoveAnnotation, messageId],
+  )
+  const boundUpdateAnnotation = React.useMemo(
+    () => onUpdateAnnotation && messageId ? (annotationId: string, patch: Partial<AnnotationV1>) => onUpdateAnnotation(messageId, annotationId, patch) : undefined,
+    [onUpdateAnnotation, messageId],
+  )
+
   // Detect dark mode from document class and listen for changes
   useEffect(() => {
     const checkDarkMode = () => {
@@ -2356,6 +2371,12 @@ export function ResponseCard({
                 mode="minimal"
                 onUrlClick={onOpenUrl}
                 onFileClick={onOpenFile}
+                sessionId={sessionId}
+                annotations={annotations}
+                onAddAnnotation={boundAddAnnotation}
+                onRemoveAnnotation={boundRemoveAnnotation}
+                onUpdateAnnotation={boundUpdateAnnotation}
+                sendMessageKey={sendMessageKey}
               >
                 {text}
               </Markdown>
@@ -2480,6 +2501,12 @@ export function ResponseCard({
               mode="minimal"
               onUrlClick={onOpenUrl}
               onFileClick={onOpenFile}
+              sessionId={sessionId}
+              annotations={annotations}
+              onAddAnnotation={boundAddAnnotation}
+              onRemoveAnnotation={boundRemoveAnnotation}
+              onUpdateAnnotation={boundUpdateAnnotation}
+              sendMessageKey={sendMessageKey}
             >
               {displayedText}
             </Markdown>

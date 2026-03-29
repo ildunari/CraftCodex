@@ -20,6 +20,7 @@ import * as React from 'react'
 import { FileText, Maximize2 } from 'lucide-react'
 import { Tooltip, TooltipTrigger, TooltipContent } from '../tooltip'
 import { renderAsync } from 'docx-preview'
+import type { AnnotationV1 } from '@craft-agent/core'
 import { cn } from '../../lib/utils'
 import { CodeBlock } from './CodeBlock'
 import { DocxPreviewOverlay } from '../overlay/DocxPreviewOverlay'
@@ -55,9 +56,33 @@ class DocxBlockErrorBoundary extends React.Component<
 export interface MarkdownDocxBlockProps {
   code: string
   className?: string
+  /** Session ID for annotation context */
+  sessionId?: string
+  /** Annotations attached to this DOCX block */
+  annotations?: AnnotationV1[]
+  /** Callback to add an annotation */
+  onAddAnnotation?: (annotation: AnnotationV1) => void
+  /** Callback to remove an annotation */
+  onRemoveAnnotation?: (annotationId: string) => void
+  /** Callback to update an annotation */
+  onUpdateAnnotation?: (annotationId: string, patch: Partial<AnnotationV1>) => void
+  /** Input send key behavior used by follow-up editor */
+  sendMessageKey?: 'enter' | 'cmd-enter'
+  /** Callback to show a toast */
+  onToast?: (message: string) => void
 }
 
-export function MarkdownDocxBlock({ code, className }: MarkdownDocxBlockProps) {
+export function MarkdownDocxBlock({
+  code,
+  className,
+  sessionId,
+  annotations,
+  onAddAnnotation,
+  onRemoveAnnotation,
+  onUpdateAnnotation,
+  sendMessageKey,
+  onToast,
+}: MarkdownDocxBlockProps) {
   const { onReadFileBinary } = usePlatform()
 
   // Parse the JSON spec
@@ -211,6 +236,13 @@ export function MarkdownDocxBlock({ code, className }: MarkdownDocxBlockProps) {
         docxData={docxData ?? undefined}
         title={spec.title}
         src={spec.src}
+        sessionId={sessionId}
+        annotations={annotations}
+        onAddAnnotation={onAddAnnotation}
+        onRemoveAnnotation={onRemoveAnnotation}
+        onUpdateAnnotation={onUpdateAnnotation}
+        sendMessageKey={sendMessageKey}
+        onToast={onToast}
       />
     </DocxBlockErrorBoundary>
   )

@@ -30,6 +30,7 @@
 import * as React from 'react'
 import { FileText, Maximize2 } from 'lucide-react'
 import { Document, Page, pdfjs } from 'react-pdf'
+import type { AnnotationV1 } from '@craft-agent/core'
 import { cn } from '../../lib/utils'
 import { CodeBlock } from './CodeBlock'
 import { PDFPreviewOverlay } from '../overlay/PDFPreviewOverlay'
@@ -79,9 +80,34 @@ export interface MarkdownPdfBlockProps {
   code: string
   className?: string
   onCreateRegionAnnotation?: (region: { page?: number; x: number; y: number; w: number; h: number; unit: 'pixel' | 'percent' }) => void
+  /** Session ID for annotation context */
+  sessionId?: string
+  /** Annotations attached to this PDF block */
+  annotations?: AnnotationV1[]
+  /** Callback to add an annotation */
+  onAddAnnotation?: (annotation: AnnotationV1) => void
+  /** Callback to remove an annotation */
+  onRemoveAnnotation?: (annotationId: string) => void
+  /** Callback to update an annotation */
+  onUpdateAnnotation?: (annotationId: string, patch: Partial<AnnotationV1>) => void
+  /** Input send key behavior used by follow-up editor */
+  sendMessageKey?: 'enter' | 'cmd-enter'
+  /** Callback to show a toast */
+  onToast?: (message: string) => void
 }
 
-export function MarkdownPdfBlock({ code, className, onCreateRegionAnnotation: _onCreateRegionAnnotation }: MarkdownPdfBlockProps) {
+export function MarkdownPdfBlock({
+  code,
+  className,
+  onCreateRegionAnnotation: _onCreateRegionAnnotation,
+  sessionId,
+  annotations,
+  onAddAnnotation,
+  onRemoveAnnotation,
+  onUpdateAnnotation,
+  sendMessageKey,
+  onToast,
+}: MarkdownPdfBlockProps) {
   const { onReadFileBinary } = usePlatform()
 
   // Parse the JSON spec — supports single src or items array
@@ -250,6 +276,13 @@ export function MarkdownPdfBlock({ code, className, onCreateRegionAnnotation: _o
         items={items}
         initialIndex={activeIndex}
         loadPdfData={loadPdfData}
+        sessionId={sessionId}
+        annotations={annotations}
+        onAddAnnotation={onAddAnnotation}
+        onRemoveAnnotation={onRemoveAnnotation}
+        onUpdateAnnotation={onUpdateAnnotation}
+        sendMessageKey={sendMessageKey}
+        onToast={onToast}
       />
     </PdfBlockErrorBoundary>
   )
