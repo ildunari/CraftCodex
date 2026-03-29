@@ -21,6 +21,7 @@ import {
   mapIframeRectsToParent,
   extractIframeContext,
 } from './iframe-selection-bridge'
+import { annotationColorToCss, HIGHLIGHT_FALLBACK_COLOR } from './annotation-style-tokens'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -200,7 +201,7 @@ export class HtmlAnnotationSurface implements AnnotationSurface {
         try {
           const highlight = new HighlightCtor!(range)
           highlights!.set(highlightId, highlight)
-          styleEntries.push({ id: highlightId, color: 'rgba(255, 200, 0, 0.3)' })
+          styleEntries.push({ id: highlightId, color: HIGHLIGHT_FALLBACK_COLOR })
           continue
         } catch {
           // Fall through to overlay for this annotation
@@ -340,7 +341,7 @@ export class HtmlAnnotationSurface implements AnnotationSurface {
       overlay.style.width = '100%'
       overlay.style.height = '100%'
       overlay.style.pointerEvents = 'none'
-      overlay.style.zIndex = '5'
+      overlay.style.zIndex = '2'
 
       const parentPosition = getComputedStyle(parent).position
       if (parentPosition === 'static') {
@@ -360,9 +361,9 @@ export class HtmlAnnotationSurface implements AnnotationSurface {
       div.style.top = `${rect.top - parentRect.top}px`
       div.style.width = `${rect.width}px`
       div.style.height = `${rect.height}px`
-      div.style.backgroundColor = 'rgba(255, 200, 0, 0.3)'
+      div.style.backgroundColor = annotationColorToCss()
       div.style.pointerEvents = 'none'
-      div.style.borderRadius = '2px'
+      div.style.borderRadius = '3px'
       overlay.appendChild(div)
     }
   }

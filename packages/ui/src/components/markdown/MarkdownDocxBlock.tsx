@@ -18,6 +18,7 @@
 
 import * as React from 'react'
 import { FileText, Maximize2 } from 'lucide-react'
+import { Tooltip, TooltipTrigger, TooltipContent } from '../tooltip'
 import { renderAsync } from 'docx-preview'
 import { cn } from '../../lib/utils'
 import { CodeBlock } from './CodeBlock'
@@ -147,19 +148,25 @@ export function MarkdownDocxBlock({ code, className }: MarkdownDocxBlockProps) {
             {spec.title || 'DOCX Preview'}
           </span>
           <div className="flex items-center gap-1">
-            <button
-              onClick={() => setIsFullscreen(true)}
-              className={cn(
-                "p-1 rounded-[6px] transition-all select-none",
-                "bg-background shadow-minimal",
-                "text-muted-foreground/50 hover:text-foreground",
-                "focus:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:opacity-100",
-                "opacity-0 group-hover:opacity-100"
-              )}
-              title="View Fullscreen"
-            >
-              <Maximize2 className="w-3.5 h-3.5" />
-            </button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  onClick={() => setIsFullscreen(true)}
+                  className={cn(
+                    "p-1 rounded-[6px] transition-all select-none",
+                    "bg-background shadow-minimal",
+                    "text-muted-foreground/50 hover:text-foreground",
+                    "focus:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:opacity-100",
+                    "opacity-0 group-hover:opacity-100"
+                  )}
+                >
+                  <Maximize2 className="w-3.5 h-3.5" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" className="text-xs">
+                View fullscreen
+              </TooltipContent>
+            </Tooltip>
           </div>
         </div>
 

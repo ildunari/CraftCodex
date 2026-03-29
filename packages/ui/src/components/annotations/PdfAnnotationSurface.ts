@@ -19,6 +19,7 @@ import type {
   ResolvedAnnotation,
 } from './types'
 import { extractContext } from './pdf-text-utils'
+import { annotationColorToCss } from './annotation-style-tokens'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -450,9 +451,9 @@ export class PdfAnnotationSurface implements AnnotationSurface {
       div.style.top = `${rect.top - containerRect.top + this.container.scrollTop}px`
       div.style.width = `${rect.width}px`
       div.style.height = `${rect.height}px`
-      div.style.backgroundColor = 'rgba(255, 200, 0, 0.3)'
+      div.style.backgroundColor = annotationColorToCss()
       div.style.pointerEvents = 'none'
-      div.style.borderRadius = '2px'
+      div.style.borderRadius = '3px'
       overlay.appendChild(div)
     }
   }

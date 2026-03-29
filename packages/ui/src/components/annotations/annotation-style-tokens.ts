@@ -1,5 +1,13 @@
 import { cn } from '../../lib/utils'
 
+/**
+ * Hardcoded highlight color for contexts where CSS custom properties are
+ * unavailable (e.g. inside iframe contentDocuments for CSS Custom Highlight
+ * API styles). Keep this visually close to the resolved value of
+ * `annotationColorToCss('yellow')`.
+ */
+export const HIGHLIGHT_FALLBACK_COLOR = 'rgba(245, 190, 50, 0.25)'
+
 export function annotationColorToCss(color?: string): string {
   switch ((color ?? 'yellow').toLowerCase()) {
     case 'green':
