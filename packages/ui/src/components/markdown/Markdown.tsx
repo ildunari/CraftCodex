@@ -16,6 +16,7 @@ import { MarkdownHtmlBlock } from './MarkdownHtmlBlock'
 import { MarkdownImageBlock } from './MarkdownImageBlock'
 import { MarkdownLatexBlock } from './MarkdownLatexBlock'
 import { MarkdownPdfBlock } from './MarkdownPdfBlock'
+import { MarkdownDocxBlock } from './MarkdownDocxBlock'
 import { preprocessLinks } from './linkify'
 import { classifyMarkdownLinkTarget } from './link-target'
 import remarkCollapsibleSections from './remarkCollapsibleSections'
@@ -254,6 +255,10 @@ function createComponents(
           if (match?.[1] === 'pdf-preview') {
             return wrapBlock('pdf-preview', code, <MarkdownPdfBlock code={code} className="my-2" />, props.node?.position)
           }
+          // DOCX preview blocks → rich document preview via docx-preview
+          if (match?.[1] === 'docx-preview') {
+            return wrapBlock('docx-preview', code, <MarkdownDocxBlock code={code} className="my-2" />, props.node?.position)
+          }
           // Image preview blocks → inline image with expand to full viewer
           if (match?.[1] === 'image-preview') {
             return wrapBlock('image-preview', code, <MarkdownImageBlock code={code} className="my-2" />, props.node?.position)
@@ -382,6 +387,10 @@ function createComponents(
         // PDF preview blocks → inline first page with expand to full viewer
         if (match?.[1] === 'pdf-preview') {
           return wrapBlock('pdf-preview', code, <MarkdownPdfBlock code={code} className="my-2" />, props.node?.position)
+        }
+        // DOCX preview blocks → rich document preview via docx-preview
+        if (match?.[1] === 'docx-preview') {
+          return wrapBlock('docx-preview', code, <MarkdownDocxBlock code={code} className="my-2" />, props.node?.position)
         }
         // Image preview blocks → inline image with expand to full viewer
         if (match?.[1] === 'image-preview') {
