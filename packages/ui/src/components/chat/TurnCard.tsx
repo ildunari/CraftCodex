@@ -41,6 +41,7 @@ import {
   formatAnnotationFollowUpTooltipText,
   getAnnotationNoteText,
 } from '../annotations/follow-up-state'
+import { formatCopyAsQuote } from '../annotations/follow-up-formatter-registry'
 import {
   SELECTION_POINTER_MAX_AGE_MS,
   clamp,
@@ -1880,6 +1881,38 @@ export function ResponseCard({
     text,
   ])
 
+  const handleHighlight = useCallback(() => {
+    if (!pendingSelection) return
+    // Create a highlight-only annotation (no note) and close the Island
+    void saveFollowUp('')
+    clearDomSelection()
+  }, [pendingSelection, saveFollowUp])
+
+  const handleCopyAsQuote = useCallback(async () => {
+    if (!pendingSelection) return
+
+    const surface = getSurface()
+    const context = surface
+      ? surface.getFollowUpContext({
+          selectedText: pendingSelection.selectedText,
+          prefix: pendingSelection.prefix,
+          suffix: pendingSelection.suffix,
+          scope: { kind: 'markdown', start: pendingSelection.start, end: pendingSelection.end },
+        })
+      : { surroundingText: pendingSelection.selectedText, documentType: 'markdown' as const }
+
+    const formatted = formatCopyAsQuote(pendingSelection.selectedText, context)
+
+    try {
+      await navigator.clipboard.writeText(formatted)
+    } catch {
+      // Clipboard API may be blocked — silently fail
+    }
+
+    clearDomSelection()
+    closeSelectionMenu()
+  }, [pendingSelection, getSurface, closeSelectionMenu])
+
   const handleSubmitFollowUp = useCallback((note: string) => {
     void saveFollowUp(note)
   }, [saveFollowUp])
@@ -2201,6 +2234,8 @@ export function ResponseCard({
       draft={followUpDraft}
       onDraftChange={setFollowUpDraft}
       onOpenFollowUp={handleOpenFollowUpView}
+      onHighlight={handleHighlight}
+      onCopyAsQuote={handleCopyAsQuote}
       onCancel={handleCancelFollowUp}
       onRequestBack={handleSelectionMenuRequestBack}
       onRequestEdit={handleRequestFollowUpEdit}

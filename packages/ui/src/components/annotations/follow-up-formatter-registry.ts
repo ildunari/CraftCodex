@@ -112,3 +112,18 @@ export function registerFormatter(kind: SurfaceKind, formatter: FollowUpFormatte
 export function capSurroundingText(text: string): string {
   return truncate(text, MAX_SURROUNDING_TEXT_LENGTH)
 }
+
+/**
+ * Format selected text + attribution as a plain-text quote for clipboard.
+ *
+ * Output:  "selected text"\n\n— filename, Section "heading", Page N
+ */
+export function formatCopyAsQuote(
+  selectedText: string,
+  context: FollowUpContext,
+): string {
+  const quoted = `\u201c${truncate(selectedText, MAX_QUOTE_LENGTH)}\u201d`
+  const formatter = getFormatter(context.documentType)
+  const attribution = formatter.formatAttribution(context)
+  return attribution ? `${quoted}\n\n${attribution}` : quoted
+}
