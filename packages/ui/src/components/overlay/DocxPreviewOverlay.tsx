@@ -15,6 +15,12 @@ import { renderAsync } from 'docx-preview'
 import type { AnnotationV1 } from '@craft-agent/core'
 import { PreviewOverlay } from './PreviewOverlay'
 import { sanitizeDocxHtml, wrapInDocxIframe } from '../annotations/docx-sanitizer'
+import { AnnotationIslandMenu } from '../annotations/AnnotationIslandMenu'
+import { AnnotationOverlayLayer } from '../annotations/AnnotationOverlayLayer'
+import { DocxAnnotationSurface } from '../annotations/DocxAnnotationSurface'
+import { usePreviewAnnotationInteraction } from '../annotations/use-preview-annotation-interaction'
+import { useAnnotationToast } from '../annotations/AnnotationToast'
+import type { PointerSnapshot } from '../annotations/island-motion'
 
 export interface DocxPreviewOverlayProps {
   /** Whether the overlay is visible */
@@ -52,12 +58,98 @@ export function DocxPreviewOverlay({
   src,
   title,
   theme,
+  sessionId,
+  annotations,
+  onAddAnnotation,
+  onRemoveAnnotation,
+  onUpdateAnnotation,
+  sendMessageKey = 'enter',
+  onToast,
 }: DocxPreviewOverlayProps) {
   const iframeRef = React.useRef<HTMLIFrameElement>(null)
+  const contentRootRef = React.useRef<HTMLDivElement>(null)
   const [renderedHtml, setRenderedHtml] = React.useState<string | null>(null)
   const [contentSize, setContentSize] = React.useState<{ width: number; height: number } | null>(null)
   const [loading, setLoading] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
+
+  // -- Annotation toast -------------------------------------------------------
+
+  const { showToast, ToastElement } = useAnnotationToast()
+
+  // Forward onToast from props, or use local toast
+  const handleToast = React.useCallback((message: string) => {
+    onToast?.(message)
+    showToast(message)
+  }, [onToast, showToast])
+
+  // -- Annotation surface management ------------------------------------------
+
+  const surfaceRef = React.useRef<DocxAnnotationSurface | null>(null)
+
+  const getSurface = React.useCallback((): DocxAnnotationSurface | null => {
+    const iframe = iframeRef.current
+    if (!iframe) {
+      surfaceRef.current = null
+      return null
+    }
+    if (!surfaceRef.current) {
+      const label = title || src
+      surfaceRef.current = new DocxAnnotationSurface(iframe, label)
+    }
+    return surfaceRef.current
+  }, [title, src])
+
+  // -- Annotation interaction (shared hook) -----------------------------------
+
+  const buildDocumentMeta = React.useCallback(() => ({
+    kind: 'docx',
+    title: title ?? undefined,
+    fileName: src ?? undefined,
+  }), [title, src])
+
+  const clearSurfaceSelection = React.useCallback(() => {
+    try {
+      iframeRef.current?.contentDocument?.getSelection()?.removeAllRanges()
+    } catch {
+      // Cross-origin
+    }
+  }, [])
+
+  const annotationInteraction = usePreviewAnnotationInteraction({
+    isOpen,
+    onAddAnnotation,
+    onRemoveAnnotation,
+    annotations,
+    sourceId: `docx:${src || '__single__'}`,
+    sourceKeySegment: `docx:${src}`,
+    sessionId,
+    sendMessageKey,
+    contentRootRef,
+    getSurface,
+    buildDocumentMeta,
+    expectedScopeKind: 'docx',
+    clearSurfaceSelection,
+    overlayRectDeps: [contentSize],
+  })
+
+  const {
+    canAnnotate,
+    handleSelectionPointerDown,
+    handleTextSelection,
+    showSelectionMenuFromCurrentSelection,
+    closeSelectionMenu,
+    annotationOverlayRects,
+    islandMenuProps,
+    overlayLayerProps,
+  } = annotationInteraction
+
+  // -- Reset annotation state on close ----------------------------------------
+
+  React.useEffect(() => {
+    closeSelectionMenu()
+    surfaceRef.current = null
+  }, [isOpen, closeSelectionMenu])
 
   // Render DOCX to HTML when overlay opens with data
   React.useEffect(() => {
@@ -122,7 +214,61 @@ export function DocxPreviewOverlay({
     } catch {
       // Cross-origin access denied
     }
+
+    // Reset surface when iframe reloads (new content)
+    surfaceRef.current = null
   }, [])
+
+  // ---------------------------------------------------------------------------
+  // Iframe mouseup bridging — capture selections from inside the iframe
+  // ---------------------------------------------------------------------------
+
+  React.useEffect(() => {
+    if (!canAnnotate || !isOpen) return
+
+    const iframe = iframeRef.current
+    if (!iframe) return
+
+    const doc = iframe.contentDocument
+    if (!doc) return
+
+    const handleIframeMouseUp = (event: MouseEvent) => {
+      const iframeRect = iframe.getBoundingClientRect()
+      const hostX = event.clientX + iframeRect.left
+      const hostY = event.clientY + iframeRect.top
+
+      annotationInteraction.lastPointerRef.current = { x: hostX, y: hostY, ts: Date.now() }
+      showSelectionMenuFromCurrentSelection()
+    }
+
+    const handleIframeMouseDown = (event: MouseEvent) => {
+      const iframeRect = iframe.getBoundingClientRect()
+      const hostX = event.clientX + iframeRect.left
+      const hostY = event.clientY + iframeRect.top
+
+      const snapshot: PointerSnapshot = { x: hostX, y: hostY, ts: Date.now() }
+      annotationInteraction.dragStartPointerRef.current = snapshot
+      annotationInteraction.lastPointerRef.current = snapshot
+    }
+
+    try {
+      doc.addEventListener('mouseup', handleIframeMouseUp)
+      doc.addEventListener('mousedown', handleIframeMouseDown)
+    } catch {
+      return // Cross-origin
+    }
+
+    return () => {
+      try {
+        doc.removeEventListener('mouseup', handleIframeMouseUp)
+        doc.removeEventListener('mousedown', handleIframeMouseDown)
+      } catch {
+        // Cross-origin
+      }
+    }
+  // Re-attach when iframe content changes (renderedHtml triggers reload)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canAnnotate, isOpen, renderedHtml, contentSize])
 
   const iframeHeight = contentSize
     ? `${contentSize.height}px`
@@ -142,7 +288,12 @@ export function DocxPreviewOverlay({
       }}
       title={title || src || 'DOCX Preview'}
     >
-      <div className="px-6 pb-6 relative">
+      <div
+        ref={contentRootRef}
+        className="px-6 pb-6 relative"
+        onMouseDown={canAnnotate ? handleSelectionPointerDown : undefined}
+        onMouseUp={canAnnotate ? handleTextSelection : undefined}
+      >
         {loading && !renderedHtml && (
           <div className="py-12 text-center text-muted-foreground text-sm">Rendering DOCX...</div>
         )}
@@ -169,7 +320,20 @@ export function DocxPreviewOverlay({
             />
           </div>
         )}
+
+        {/* Annotation highlight overlay */}
+        {annotationOverlayRects.length > 0 && (
+          <AnnotationOverlayLayer {...overlayLayerProps} />
+        )}
+
+        {/* Toast messages */}
+        {ToastElement}
       </div>
+
+      {/* Annotation Island Menu */}
+      {canAnnotate && (
+        <AnnotationIslandMenu {...islandMenuProps} />
+      )}
     </PreviewOverlay>
   )
 }
