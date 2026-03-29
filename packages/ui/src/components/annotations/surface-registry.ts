@@ -1,4 +1,6 @@
+import type { PDFPageProxy } from 'pdfjs-dist/types/src/display/api'
 import type { AnnotationSurface, SurfaceKind } from './types'
+import { PdfAnnotationSurface } from './PdfAnnotationSurface'
 
 type SurfaceFactory = (...args: unknown[]) => AnnotationSurface
 
@@ -24,3 +26,17 @@ export function getSupportedKinds(): SurfaceKind[] {
 export function unregisterSurface(kind: SurfaceKind): boolean {
   return registry.delete(kind)
 }
+
+// ---------------------------------------------------------------------------
+// Built-in registrations
+// ---------------------------------------------------------------------------
+
+// Register the PDF surface factory.
+// Usage: createSurface('pdf', container, getPage, fileName?)
+registerSurface('pdf', (container, getPage, fileName) =>
+  new PdfAnnotationSurface(
+    container as HTMLElement,
+    getPage as (pageNumber: number) => Promise<PDFPageProxy>,
+    fileName as string | undefined,
+  ),
+)
