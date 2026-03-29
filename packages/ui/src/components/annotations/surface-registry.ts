@@ -1,6 +1,7 @@
 import type { PDFPageProxy } from 'pdfjs-dist/types/src/display/api'
 import type { AnnotationSurface, SurfaceKind } from './types'
 import { PdfAnnotationSurface } from './PdfAnnotationSurface'
+import { HtmlAnnotationSurface } from './HtmlAnnotationSurface'
 
 type SurfaceFactory = (...args: unknown[]) => AnnotationSurface
 
@@ -37,6 +38,15 @@ registerSurface('pdf', (container, getPage, fileName) =>
   new PdfAnnotationSurface(
     container as HTMLElement,
     getPage as (pageNumber: number) => Promise<PDFPageProxy>,
+    fileName as string | undefined,
+  ),
+)
+
+// Register the HTML surface factory.
+// Usage: createSurface('html', iframe, fileName?)
+registerSurface('html', (iframe, fileName) =>
+  new HtmlAnnotationSurface(
+    iframe as HTMLIFrameElement,
     fileName as string | undefined,
   ),
 )
