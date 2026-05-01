@@ -1,4 +1,134 @@
-import type { FileAttachment, LoadedSource, PermissionMode } from '../../shared/types'
+import type {
+  FileAttachment,
+  LoadedSource,
+  PermissionMode,
+  MessagingPlatformRuntimeInfo,
+  WhatsAppUiEvent,
+} from '../../shared/types'
+import type { MessagingBinding } from '../atoms/messaging'
+
+// ============================================================================
+// Messaging mock state + control handle
+// ============================================================================
+//
+// The real messaging flow is driven by IPC push events (platform status,
+// binding changes, WhatsApp pairing phases). To make the messaging UI
+// previewable, we replace those IPC calls with an in-memory event bus and
+// expose a `window.__playgroundMessaging` handle so variant/preview wrappers
+// can flip state (connected ↔ disconnected, WhatsApp phase, bindings) without
+// remounting the component.
+
+type PlatformStatusListener = (
+  workspaceId: string,
+  platform: string,
+  status: MessagingPlatformRuntimeInfo,
+) => void
+type BindingListener = (workspaceId: string) => void
+type WhatsAppEventListener = (payload: { workspaceId: string; event: WhatsAppUiEvent }) => void
+
+const PLAYGROUND_WORKSPACE_ID = 'playground-workspace'
+
+interface MessagingMockState {
+  runtime: {
+    telegram: MessagingPlatformRuntimeInfo
+    whatsapp: MessagingPlatformRuntimeInfo
+  }
+  bindings: MessagingBinding[]
+  platformStatusListeners: Set<PlatformStatusListener>
+  bindingListeners: Set<BindingListener>
+  waEventListeners: Set<WhatsAppEventListener>
+}
+
+function defaultRuntime(platform: 'telegram' | 'whatsapp'): MessagingPlatformRuntimeInfo {
+  return {
+    platform,
+    configured: false,
+    connected: false,
+    state: 'disconnected',
+    updatedAt: Date.now(),
+  }
+}
+
+const messagingMockState: MessagingMockState = {
+  runtime: {
+    telegram: defaultRuntime('telegram'),
+    whatsapp: defaultRuntime('whatsapp'),
+  },
+  bindings: [],
+  platformStatusListeners: new Set(),
+  bindingListeners: new Set(),
+  waEventListeners: new Set(),
+}
+
+function emitPlatformStatus(platform: 'telegram' | 'whatsapp') {
+  const status = messagingMockState.runtime[platform]
+  for (const listener of messagingMockState.platformStatusListeners) {
+    try { listener(PLAYGROUND_WORKSPACE_ID, platform, status) } catch (err) { console.error(err) }
+  }
+}
+
+function emitBindingChanged() {
+  for (const listener of messagingMockState.bindingListeners) {
+    try { listener(PLAYGROUND_WORKSPACE_ID) } catch (err) { console.error(err) }
+  }
+}
+
+function emitWhatsAppEvent(event: WhatsAppUiEvent) {
+  for (const listener of messagingMockState.waEventListeners) {
+    try { listener({ workspaceId: PLAYGROUND_WORKSPACE_ID, event }) } catch (err) { console.error(err) }
+  }
+}
+
+export interface PlaygroundMessagingHandle {
+  /** Snapshot of current state (for debugging from DevTools). */
+  state: MessagingMockState
+  setTelegramConnected: (connected: boolean, identity?: string) => void
+  setWhatsAppConnected: (connected: boolean, identity?: string) => void
+  setBindings: (bindings: MessagingBinding[]) => void
+  fireWAEvent: (event: WhatsAppUiEvent) => void
+  reset: () => void
+}
+
+export const playgroundMessagingHandle: PlaygroundMessagingHandle = {
+  state: messagingMockState,
+  setTelegramConnected(connected, identity) {
+    messagingMockState.runtime.telegram = {
+      platform: 'telegram',
+      configured: connected,
+      connected,
+      state: connected ? 'connected' : 'disconnected',
+      identity,
+      updatedAt: Date.now(),
+    }
+    emitPlatformStatus('telegram')
+  },
+  setWhatsAppConnected(connected, identity) {
+    messagingMockState.runtime.whatsapp = {
+      platform: 'whatsapp',
+      configured: connected,
+      connected,
+      state: connected ? 'connected' : 'disconnected',
+      identity,
+      updatedAt: Date.now(),
+    }
+    emitPlatformStatus('whatsapp')
+  },
+  setBindings(bindings) {
+    messagingMockState.bindings = bindings
+    emitBindingChanged()
+  },
+  fireWAEvent(event) {
+    emitWhatsAppEvent(event)
+  },
+  reset() {
+    messagingMockState.runtime.telegram = defaultRuntime('telegram')
+    messagingMockState.runtime.whatsapp = defaultRuntime('whatsapp')
+    messagingMockState.bindings = []
+    emitPlatformStatus('telegram')
+    emitPlatformStatus('whatsapp')
+    emitBindingChanged()
+  },
+}
 
 // ============================================================================
 // Mock electronAPI
@@ -6,6 +136,10 @@ import type { FileAttachment, LoadedSource, PermissionMode } from '../../shared/
 
 export const mockElectronAPI = {
   isDebugMode: async () => true,
+
+  // Called at module-load time by SessionFilesSection.tsx (and others) to
+  // branch between Electron and web-UI rendering. Must be synchronous.
+  getRuntimeEnvironment: (): 'electron' | 'web' => 'electron',
 
   openFileDialog: async () => {
     console.log('[Playground] openFileDialog called')
@@ -96,13 +230,14 @@ export const mockElectronAPI = {
     { key: 'anthropic', label: 'Anthropic', placeholder: 'sk-ant-...' },
     { key: 'openai', label: 'OpenAI', placeholder: 'sk-...' },
     { key: 'google', label: 'Google AI Studio', placeholder: 'AIza...' },
+    { key: 'deepseek', label: 'DeepSeek', placeholder: 'sk-...' },
   ],
   getPiProviderBaseUrl: async () => '',
   getPiProviderModels: async (provider: string) => {
     const MOCK_MODELS: Record<string, Array<{ id: string; name: string; costInput: number; costOutput: number; contextWindow: number; reasoning: boolean }>> = {
       'openrouter': [
         // Top 10 expensive
-        { id: 'anthropic/claude-opus-4.6', name: 'Claude Opus 4.6', costInput: 5, costOutput: 25, contextWindow: 200000, reasoning: true },
+        { id: 'anthropic/claude-opus-4.7', name: 'Claude Opus 4.7', costInput: 5, costOutput: 25, contextWindow: 200000, reasoning: true },
         { id: 'xai/grok-4', name: 'Grok 4', costInput: 6, costOutput: 18, contextWindow: 256000, reasoning: true },
         { id: 'anthropic/claude-sonnet-4.6', name: 'Claude Sonnet 4.6', costInput: 3, costOutput: 15, contextWindow: 200000, reasoning: true },
         { id: 'openai/gpt-5.2-codex', name: 'GPT-5.2 Codex', costInput: 1.75, costOutput: 14, contextWindow: 400000, reasoning: false },
@@ -134,6 +269,10 @@ export const mockElectronAPI = {
         { id: 'mistral-medium-3.1', name: 'Mistral Medium 3.1', costInput: 1, costOutput: 3, contextWindow: 131072, reasoning: false },
         { id: 'mistral-small-3.2-24b-instruct', name: 'Mistral Small 3.2', costInput: 0.1, costOutput: 0.3, contextWindow: 131072, reasoning: false },
       ],
+      'deepseek': [
+        { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', costInput: 0.56, costOutput: 1.68, contextWindow: 128000, reasoning: true },
+        { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', costInput: 0.14, costOutput: 0.42, contextWindow: 128000, reasoning: true },
+      ],
       'xai': [
         { id: 'grok-4', name: 'Grok 4', costInput: 6, costOutput: 18, contextWindow: 256000, reasoning: true },
         { id: 'grok-4-fast', name: 'Grok 4 Fast', costInput: 3, costOutput: 9, contextWindow: 256000, reasoning: false },
@@ -151,7 +290,7 @@ export const mockElectronAPI = {
         { id: 'gpt-4o-mini', name: 'GPT-4o Mini', costInput: 0.15, costOutput: 0.6, contextWindow: 128000, reasoning: false },
       ],
       'amazon-bedrock': [
-        { id: 'anthropic.claude-opus-4.6', name: 'Claude Opus 4.6', costInput: 5, costOutput: 25, contextWindow: 200000, reasoning: true },
+        { id: 'anthropic.claude-opus-4.7', name: 'Claude Opus 4.7', costInput: 5, costOutput: 25, contextWindow: 200000, reasoning: true },
         { id: 'anthropic.claude-sonnet-4.6', name: 'Claude Sonnet 4.6', costInput: 3, costOutput: 15, contextWindow: 200000, reasoning: true },
         { id: 'anthropic.claude-haiku-4.5', name: 'Claude Haiku 4.5', costInput: 1, costOutput: 5, contextWindow: 200000, reasoning: false },
       ],
@@ -161,7 +300,7 @@ export const mockElectronAPI = {
         { id: 'glm-4.7-flash', name: 'GLM-4.7 Flash', costInput: 0, costOutput: 0, contextWindow: 128000, reasoning: false },
       ],
       'vercel-ai-gateway': [
-        { id: 'anthropic/claude-opus-4.6', name: 'Claude Opus 4.6', costInput: 5, costOutput: 25, contextWindow: 200000, reasoning: true },
+        { id: 'anthropic/claude-opus-4.7', name: 'Claude Opus 4.7', costInput: 5, costOutput: 25, contextWindow: 200000, reasoning: true },
         { id: 'anthropic/claude-sonnet-4.6', name: 'Claude Sonnet 4.6', costInput: 3, costOutput: 15, contextWindow: 200000, reasoning: true },
         { id: 'openai/gpt-5.2-codex', name: 'GPT-5.2 Codex', costInput: 1.75, costOutput: 14, contextWindow: 400000, reasoning: false },
       ],
@@ -171,19 +310,169 @@ export const mockElectronAPI = {
     const MOCK_TOTAL_COUNTS: Record<string, number> = { 'openrouter': 233, 'vercel-ai-gateway': 129, 'amazon-bedrock': 79 }
     return { models, totalCount: MOCK_TOTAL_COUNTS[provider] ?? models.length }
   },
+
+  // ------------------------------------------------------------------
+  // Messaging Gateway (Telegram + WhatsApp)
+  // ------------------------------------------------------------------
+
+  getMessagingConfig: async () => {
+    console.log('[Playground] getMessagingConfig called')
+    return {
+      enabled: true,
+      platforms: {
+        telegram: { enabled: true },
+        whatsapp: { enabled: true },
+      },
+      runtime: {
+        telegram: messagingMockState.runtime.telegram,
+        whatsapp: messagingMockState.runtime.whatsapp,
+      },
+    }
+  },
+
+  updateMessagingConfig: async (config: Record<string, unknown>) => {
+    console.log('[Playground] updateMessagingConfig called:', config)
+  },
+
+  testTelegramToken: async (token: string) => {
+    console.log('[Playground] testTelegramToken called')
+    if (token.includes(':') && token.length > 10) {
+      return { success: true, botName: 'Playground Bot', botUsername: 'playground_bot' }
+    }
+    return { success: false, error: 'Invalid token format (expected 1234567:ABC...)' }
+  },
+
+  saveTelegramToken: async (token: string) => {
+    console.log('[Playground] saveTelegramToken called')
+    void token
+    playgroundMessagingHandle.setTelegramConnected(true, 'Playground Bot')
+  },
+
+  disconnectMessagingPlatform: async (platform: string) => {
+    console.log('[Playground] disconnectMessagingPlatform called:', platform)
+    if (platform === 'telegram') playgroundMessagingHandle.setTelegramConnected(false)
+    if (platform === 'whatsapp') playgroundMessagingHandle.setWhatsAppConnected(false)
+  },
+
+  forgetMessagingPlatform: async (platform: string) => {
+    console.log('[Playground] forgetMessagingPlatform called:', platform)
+    if (platform === 'telegram') playgroundMessagingHandle.setTelegramConnected(false)
+    if (platform === 'whatsapp') playgroundMessagingHandle.setWhatsAppConnected(false)
+    // Drop bindings for that platform
+    playgroundMessagingHandle.setBindings(
+      messagingMockState.bindings.filter((b) => b.platform !== platform),
+    )
+  },
+
+  getMessagingBindings: async () => {
+    console.log('[Playground] getMessagingBindings called')
+    return messagingMockState.bindings
+  },
+
+  generateMessagingPairingCode: async (sessionId: string, platform: string) => {
+    console.log('[Playground] generateMessagingPairingCode called:', { sessionId, platform })
+    return {
+      code: '482193',
+      expiresAt: Date.now() + 5 * 60_000,
+      botUsername: platform === 'telegram' ? 'playground_bot' : undefined,
+    }
+  },
+
+  unbindMessagingSession: async (sessionId: string, platform?: string) => {
+    console.log('[Playground] unbindMessagingSession called:', { sessionId, platform })
+    playgroundMessagingHandle.setBindings(
+      messagingMockState.bindings.filter((b) => {
+        if (b.sessionId !== sessionId) return true
+        if (platform && b.platform !== platform) return true
+        return false
+      }),
+    )
+  },
+
+  unbindMessagingBinding: async (bindingId: string) => {
+    console.log('[Playground] unbindMessagingBinding called:', bindingId)
+    playgroundMessagingHandle.setBindings(
+      messagingMockState.bindings.filter((b) => b.id !== bindingId),
+    )
+    return { success: true }
+  },
+
+  onMessagingBindingChanged: (callback: (workspaceId: string) => void) => {
+    messagingMockState.bindingListeners.add(callback)
+    return () => {
+      messagingMockState.bindingListeners.delete(callback)
+    }
+  },
+
+  onMessagingPlatformStatus: (
+    callback: (
+      workspaceId: string,
+      platform: string,
+      status: MessagingPlatformRuntimeInfo,
+    ) => void,
+  ) => {
+    messagingMockState.platformStatusListeners.add(callback)
+    return () => {
+      messagingMockState.platformStatusListeners.delete(callback)
+    }
+  },
+
+  // WhatsApp subprocess-based pairing — we fire a synthetic QR after a short
+  // delay so the "show_qr" phase is visible by default, but variants can
+  // override this by calling __playgroundMessaging.fireWAEvent().
+  startWhatsAppConnect: async () => {
+    console.log('[Playground] startWhatsAppConnect called')
+    setTimeout(() => {
+      emitWhatsAppEvent({
+        type: 'qr',
+        qr: 'playground://whatsapp/qr/' + Math.random().toString(36).slice(2),
+      })
+    }, 400)
+    return { success: true }
+  },
+
+  submitWhatsAppPhone: async (phoneNumber: string) => {
+    console.log('[Playground] submitWhatsAppPhone called:', phoneNumber)
+    return { success: true }
+  },
+
+  onWhatsAppEvent: (
+    callback: (payload: { workspaceId: string; event: WhatsAppUiEvent }) => void,
+  ) => {
+    messagingMockState.waEventListeners.add(callback)
+    return () => {
+      messagingMockState.waEventListeners.delete(callback)
+    }
+  },
 }
 
 /**
  * Inject mock electronAPI into window if not already present.
  * Call this in playground component wrappers before rendering components
  * that depend on electronAPI.
+ *
+ * IMPORTANT: this also runs as a top-level side effect when this module is
+ * imported (see below), so that consumers relying on a synchronous
+ * `window.electronAPI.*` read at module-load time (e.g.
+ * `SessionFilesSection.tsx`'s top-level `getRuntimeEnvironment()` call) see
+ * the mock before their module is evaluated. The entry `playground.tsx`
+ * must import this module before any component chain that touches
+ * `window.electronAPI` at import time.
  */
 export function ensureMockElectronAPI() {
   if (!window.electronAPI) {
     ;(window as any).electronAPI = mockElectronAPI
     console.log('[Playground] Injected mock electronAPI')
   }
+  if (!(window as any).__playgroundMessaging) {
+    ;(window as any).__playgroundMessaging = playgroundMessagingHandle
+    console.log('[Playground] Exposed __playgroundMessaging handle')
+  }
 }
+
+// Install on import so any later module that reads `window.electronAPI` at
+// top level finds the mock in place. Safe: only runs once (idempotent).
+ensureMockElectronAPI()
 
 // ============================================================================
 // Sample Data

@@ -58,6 +58,19 @@ import { toast } from 'sonner'
 
 const AGENT_CATALOG_LOAD_TIMEOUT_MS = 12_000
 
+const THINKING_LEVEL_COPY: Record<ThinkingLevel, { name: string; description: string }> = {
+  off: { name: 'Off', description: 'No extended reasoning' },
+  low: { name: 'Low', description: 'Light reasoning, faster responses' },
+  medium: { name: 'Medium', description: 'Balanced reasoning depth' },
+  high: { name: 'High', description: 'Deep reasoning for complex tasks' },
+  xhigh: { name: 'XHigh', description: 'Extra-high reasoning depth' },
+  max: { name: 'Max', description: 'Maximum reasoning effort' },
+}
+
+function getThinkingLevelLabel(level: ThinkingLevel): string {
+  return THINKING_LEVEL_COPY[level]?.name ?? level
+}
+
 function withAgentCatalogTimeout<T>(promise: Promise<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     const timer = window.setTimeout(() => {
@@ -440,8 +453,7 @@ function WorkspaceOverrideCard({ workspace, llmConnections, onSettingsChange }: 
       parts.push(getModelShortName(settings.model))
     }
     if (settings?.thinkingLevel) {
-      const level = THINKING_LEVELS.find(l => l.id === settings.thinkingLevel)
-      parts.push(level?.name || settings.thinkingLevel)
+      parts.push(getThinkingLevelLabel(settings.thinkingLevel))
     }
     return parts.join(' · ')
   }
@@ -508,10 +520,10 @@ function WorkspaceOverrideCard({ workspace, llmConnections, onSettingsChange }: 
                 onValueChange={handleThinkingChange}
                 options={[
                   { value: 'global', label: 'Use default', description: 'Inherit from app settings' },
-                  ...THINKING_LEVELS.map(({ id, name, description }) => ({
+                  ...THINKING_LEVELS.map(({ id }) => ({
                     value: id,
-                    label: name,
-                    description,
+                    label: THINKING_LEVEL_COPY[id].name,
+                    description: THINKING_LEVEL_COPY[id].description,
                   })),
                 ]}
               />
@@ -1125,10 +1137,10 @@ export default function AiSettingsPage() {
                     description="Reasoning depth for new chats"
                     value={defaultThinking}
                     onValueChange={(v) => handleDefaultThinkingChange(v as ThinkingLevel)}
-                    options={THINKING_LEVELS.map(({ id, name, description }) => ({
+                    options={THINKING_LEVELS.map(({ id }) => ({
                       value: id,
-                      label: name,
-                      description,
+                      label: THINKING_LEVEL_COPY[id].name,
+                      description: THINKING_LEVEL_COPY[id].description,
                     }))}
                   />
                 </SettingsCard>

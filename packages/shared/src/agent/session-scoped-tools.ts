@@ -17,7 +17,6 @@
 
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
 import { getSessionPlansPath, getSessionPath } from '../sessions/storage.ts';
-import { debug } from '../utils/debug.ts';
 import { DOC_REFS } from '../docs/index.ts';
 import { createClaudeContext } from './claude-context.ts';
 import { basename } from 'node:path';
@@ -36,6 +35,7 @@ import { createLLMTool, type LLMQueryRequest, type LLMQueryResult } from './llm-
 import { createSpawnSessionTool, type SpawnSessionFn } from './spawn-session-tool.ts';
 import { createBrowserTools, type BrowserPaneFns } from './browser-tools.ts';
 import { FEATURE_FLAGS } from '../feature-flags.ts';
+import { getBrowserToolEnabled } from '../config/storage.ts';
 
 // Re-export types for backward compatibility
 export type {
@@ -57,87 +57,21 @@ export type {
 export type { BrowserPaneFns } from './browser-tools.ts';
 
 // ============================================================
-// Session-Scoped Tool Callbacks
+// Session-Scoped Tool Callbacks (re-exported from dedicated registry module)
 // ============================================================
 
-/**
- * Callbacks that can be registered per-session
- */
-export interface SessionScopedToolCallbacks {
-  /**
-   * Called when a plan is submitted via SubmitPlan tool.
-   * Receives the path to the plan markdown file.
-   */
-  onPlanSubmitted?: (planPath: string) => void;
+// Re-export for all downstream consumers (index.ts, claude-agent.ts, pi-agent.ts, etc.)
+export {
+  type SessionScopedToolCallbacks,
+  registerSessionScopedToolCallbacks,
+  mergeSessionScopedToolCallbacks,
+  unregisterSessionScopedToolCallbacks,
+  getSessionScopedToolCallbacks,
+} from './session-scoped-tool-callback-registry.ts';
 
-  /**
-   * Called when authentication is requested via OAuth/credential tools.
-   * The auth UI should be shown and execution paused.
-   */
-  onAuthRequest?: (request: AuthRequest) => void;
-
-  /**
-   * Agent-native LLM query callback for call_llm tool (OAuth path).
-   * Each agent backend sets this to its own queryLlm implementation.
-   */
-  queryFn?: (request: LLMQueryRequest) => Promise<LLMQueryResult>;
-
-  /**
-   * Callback for spawn_session tool — creates an independent session and sends initial prompt.
-   * Each agent backend delegates to its onSpawnSession callback.
-   */
-  spawnSessionFn?: SpawnSessionFn;
-
-  /**
-   * Browser pane functions for browser_* tools.
-   * Set by the Electron session manager — wraps BrowserPaneManager
-   * with the session's bound browser instance.
-   */
-  browserPaneFns?: BrowserPaneFns;
-}
-
-// Registry of callbacks keyed by sessionId
-const sessionScopedToolCallbackRegistry = new Map<string, SessionScopedToolCallbacks>();
-
-/**
- * Register callbacks for a specific session
- */
-export function registerSessionScopedToolCallbacks(
-  sessionId: string,
-  callbacks: SessionScopedToolCallbacks
-): void {
-  sessionScopedToolCallbackRegistry.set(sessionId, callbacks);
-  debug('session-scoped-tools', `Registered callbacks for session ${sessionId}`);
-}
-
-/**
- * Merge additional callbacks into an existing session's callback set.
- * Used by the Electron session manager to add browser pane functions
- * after the agent has already registered its core callbacks.
- */
-export function mergeSessionScopedToolCallbacks(
-  sessionId: string,
-  callbacks: Partial<SessionScopedToolCallbacks>
-): void {
-  const existing = sessionScopedToolCallbackRegistry.get(sessionId) ?? {};
-  sessionScopedToolCallbackRegistry.set(sessionId, { ...existing, ...callbacks });
-  debug('session-scoped-tools', `Merged callbacks for session ${sessionId}`);
-}
-
-/**
- * Unregister callbacks for a session
- */
-export function unregisterSessionScopedToolCallbacks(sessionId: string): void {
-  sessionScopedToolCallbackRegistry.delete(sessionId);
-  debug('session-scoped-tools', `Unregistered callbacks for session ${sessionId}`);
-}
-
-/**
- * Get callbacks for a session
- */
-export function getSessionScopedToolCallbacks(sessionId: string): SessionScopedToolCallbacks | undefined {
-  return sessionScopedToolCallbackRegistry.get(sessionId);
-}
+// Local imports for use within this file's factory function
+import { getSessionScopedToolCallbacks } from './session-scoped-tool-callback-registry.ts';
+import { attachSessionSelfManagementBindings } from './session-self-management-bindings.ts';
 
 /** Backend-executed session tools currently supported by the Claude adapter layer. */
 export const CLAUDE_BACKEND_SESSION_TOOL_NAMES = new Set<string>([
@@ -237,6 +171,14 @@ function convertResult(result: ToolResult): { content: Array<{ type: 'text'; tex
 const sessionToolsCache = new Map<string, ReturnType<typeof tool>[]>();
 
 /**
+ * Invalidate ALL session tool caches (e.g., when a global setting like browserToolEnabled changes).
+ * This forces tools to be rebuilt on the next message for every session.
+ */
+export function invalidateAllSessionToolsCaches(): void {
+  sessionToolsCache.clear();
+}
+
+/**
  * Clean up cached tools for a session
  */
 export function cleanupSessionScopedTools(sessionId: string): void {
@@ -299,6 +241,9 @@ export function getSessionScopedTools(
       },
     });
 
+    // Attach session self-management bindings (lazy getters from callback registry)
+    attachSessionSelfManagementBindings(ctx, sessionId);
+
     // Helper to create a tool from the canonical registry.
     // The `as any` on schema bridges a Zod generic-variance issue when .shape
     // types (ZodType<string>) flow into Record<string, ZodType<unknown>>.
@@ -345,15 +290,19 @@ export function getSessionScopedTools(
     );
 
     // Add browser_* tools — backend-specific (requires BrowserPaneManager in Electron)
-    tools.push(
-      ...createBrowserTools({
-        sessionId,
-        getBrowserPaneFns: () => {
-          const callbacks = getSessionScopedToolCallbacks(sessionId);
-          return callbacks?.browserPaneFns;
-        },
-      }),
-    );
+    // Gated by the "Built-in browser" setting so users with external browser tools
+    // (Playwright, Puppeteer, etc.) can disable the built-in one.
+    if (getBrowserToolEnabled()) {
+      tools.push(
+        ...createBrowserTools({
+          sessionId,
+          getBrowserPaneFns: () => {
+            const callbacks = getSessionScopedToolCallbacks(sessionId);
+            return callbacks?.browserPaneFns;
+          },
+        }),
+      );
+    }
 
     sessionToolsCache.set(cacheKey, tools);
   }

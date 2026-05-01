@@ -1,5 +1,7 @@
 import * as React from 'react'
 import { useMemo, useEffect, useRef, useCallback, useState } from 'react'
+import i18n from 'i18next'
+import { useTranslation } from 'react-i18next'
 import type { ToolDisplayMeta, AnnotationV1 } from '@craft-agent/core'
 import { normalizePath, pathStartsWith, stripPathPrefix } from '@craft-agent/core/utils'
 import { motion, AnimatePresence } from 'motion/react'
@@ -523,6 +525,10 @@ function getToolDisplayName(name: string): string {
   // Friendly display names for specific tools
   const displayNames: Record<string, string> = {
     'TodoWrite': 'Todo List Updated',
+    'set_session_labels': 'Set Session Labels',
+    'set_session_status': 'Set Session Status',
+    'get_session_info': 'Get Session Info',
+    'list_sessions': 'List Sessions',
   }
 
   return displayNames[stripped] || stripped
@@ -692,7 +698,7 @@ function formatToolDisplay(
   }
 
   // Final fallback: Use LLM-generated displayName or tool name
-  const name = displayName || (toolName ? getToolDisplayName(toolName) : 'Processing')
+  const name = displayName || (toolName ? getToolDisplayName(toolName) : i18n.t('turnCard.processing'))
   return { name }
 }
 
@@ -712,7 +718,7 @@ function getPreviewText(
   if (activityWithIntent?.intent) return activityWithIntent.intent
 
   // Check if we're in responding state
-  if (isStreaming && hasResponse) return 'Responding...'
+  if (isStreaming && hasResponse) return i18n.t('turnCard.responding')
 
   // Find running Task tools and show their description
   const runningTask = activities.find(a => a.toolName === 'Task' && a.status === 'running')
@@ -747,7 +753,7 @@ function getPreviewText(
   const firstTask = activities.find(a => a.toolName === 'Task')
   if (firstTask?.toolInput?.description) {
     const errorSuffix = errorCount > 0
-      ? ` · ${errorCount} error${errorCount > 1 ? 's' : ''}`
+      ? i18n.t('turnCard.errorCount', { count: errorCount })
       : ''
     return `${firstTask.toolInput.description as string}${errorSuffix}`
   }
@@ -755,12 +761,12 @@ function getPreviewText(
   // When complete, show summary (badge already shows count)
   if (isComplete || (!isStreaming && activities.length > 0)) {
     const errorSuffix = errorCount > 0
-      ? ` · ${errorCount} error${errorCount > 1 ? 's' : ''}`
+      ? i18n.t('turnCard.errorCount', { count: errorCount })
       : ''
-    return `Steps Completed${errorSuffix}`
+    return `${i18n.t('turnCard.stepsCompleted')}${errorSuffix}`
   }
 
-  return 'Starting...'
+  return i18n.t('turnCard.starting')
 }
 
 
@@ -1031,7 +1037,7 @@ function ActivityRow({ activity, onOpenDetails, isLastChild, sessionFolderPath, 
                     className="px-1.5 py-0.5 bg-[color-mix(in_oklab,var(--destructive)_4%,var(--background))] shadow-tinted rounded-[4px] text-[10px] text-destructive font-medium cursor-default shrink-0"
                     style={{ '--shadow-color': 'var(--destructive-rgb)' } as React.CSSProperties}
                   >
-                    Error
+                    {i18n.t('common.error')}
                   </span>
                 </TooltipTrigger>
                 <TooltipContent side="top" className="max-w-[400px]">
@@ -1426,6 +1432,7 @@ interface BranchDropdownProps {
 }
 
 function BranchDropdown({ onBranch }: BranchDropdownProps) {
+  const { t } = useTranslation()
   const handleBranchClick = () => {
     onBranch({ newPanel: true })
   }
@@ -1435,8 +1442,8 @@ function BranchDropdown({ onBranch }: BranchDropdownProps) {
       <DropdownMenuTrigger asChild>
         <button
           type="button"
-          aria-label="Branch options"
-          title="Branch"
+          aria-label={t('chat.branchOptions')}
+          title={t('chat.branch')}
           className={cn(
             "p-1 rounded-[4px] transition-colors select-none",
             "text-muted-foreground hover:text-foreground hover:bg-foreground/5",
@@ -1451,9 +1458,9 @@ function BranchDropdown({ onBranch }: BranchDropdownProps) {
       <StyledDropdownMenuContent align="end" minWidth="min-w-64" sideOffset={6}>
         <StyledDropdownMenuItem onClick={handleBranchClick} className="items-start py-2">
           <div className="flex flex-col gap-0.5">
-            <span className="text-[13px] leading-tight">Branch From This message</span>
+            <span className="text-[13px] leading-tight">{t('chat.branchFromThisMessage')}</span>
             <span className="max-w-[220px] whitespace-normal text-xs leading-tight text-muted-foreground">
-              Explore an alternate direction without disrupting this conversation’s flow.
+              {t('chat.branchFromThisMessageDescription')}
             </span>
           </div>
         </StyledDropdownMenuItem>
@@ -1659,6 +1666,7 @@ export function ResponseCard({
   openAnnotationRequest,
   annotationInteractionMode = 'interactive',
 }: ResponseCardProps) {
+  const { t } = useTranslation()
   // Throttled content for display - updates every CONTENT_THROTTLE_MS during streaming
   const [displayedText, setDisplayedText] = useState(text)
   const lastUpdateRef = useRef(Date.now())
@@ -2410,7 +2418,8 @@ export function ResponseCard({
     return (
       <>
         <div className="bg-background shadow-minimal rounded-[8px] overflow-hidden relative group">
-          {/* Fullscreen button - top right corner, visible on hover */}
+          {/* Fullscreen button - desktop only; compact mode keeps message chrome minimal */}
+          {!compactMode && (
           <button
             onClick={() => setIsFullscreen(true)}
             className={cn(
@@ -2420,10 +2429,11 @@ export function ResponseCard({
               "text-muted-foreground/50 hover:text-foreground",
               "focus:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:opacity-100"
             )}
-            title="View Fullscreen"
+            title={t('common.viewFullscreen')}
           >
             <Maximize2 className="w-3.5 h-3.5" />
           </button>
+          )}
 
           {/* Plan header - only shown for plan variant */}
           {isPlan && (
@@ -2441,6 +2451,7 @@ export function ResponseCard({
           {/* Scrollable content area with subtle fade at edges (dark mode only) */}
           <div
             ref={contentRef}
+            data-search-root="response"
             onMouseDown={handleSelectionPointerDown}
             onMouseUp={handleTextSelection}
             className="pl-[22px] pr-[16px] py-3 text-sm overflow-y-auto scrollbar-hover"
@@ -2484,12 +2495,12 @@ export function ResponseCard({
                   {copied ? (
                     <>
                       <Check className={SIZE_CONFIG.iconSize} />
-                      <span>Copied!</span>
+                      <span>{t("common.copied")}</span>
                     </>
                   ) : (
                     <>
                       <Copy className={SIZE_CONFIG.iconSize} />
-                      <span>Copy</span>
+                      <span>{t("common.copy")}</span>
                     </>
                   )}
                 </button>
@@ -2523,8 +2534,8 @@ export function ResponseCard({
                     <AcceptPlanDropdown
                       onAccept={onAccept}
                       onAcceptWithCompact={onAcceptWithCompact}
-                      acceptLabel={hasActiveFollowUpAnnotations ? 'Accept & Send Follow-ups' : 'Accept Plan'}
-                      acceptOptionLabel={hasActiveFollowUpAnnotations ? 'Accept & Send Follow-ups' : 'Accept'}
+                      acceptLabel={hasActiveFollowUpAnnotations ? t('plan.acceptAndSendFollowups') : t('plan.acceptPlan')}
+                      acceptOptionLabel={hasActiveFollowUpAnnotations ? t('plan.acceptAndSendFollowups') : t('plan.accept')}
                     />
                   </div>
                 )}
@@ -2565,6 +2576,7 @@ export function ResponseCard({
         {/* Subtle fade at top and bottom edges (dark mode only) */}
         <div
           ref={contentRef}
+          data-search-root="response"
           onMouseDown={handleSelectionPointerDown}
           onMouseUp={handleTextSelection}
           className="pl-[22px] pr-4 py-3 text-sm overflow-y-auto scrollbar-hover"

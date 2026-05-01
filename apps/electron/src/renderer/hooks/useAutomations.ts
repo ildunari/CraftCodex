@@ -10,15 +10,16 @@
  */
 
 import { useState, useCallback, useEffect } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useSetAtom } from 'jotai'
 import { toast } from 'sonner'
 import { automationsAtom } from '@/atoms/automations'
 import { parseAutomationsConfig, type AutomationListItem, type TestResult, type ExecutionEntry } from '@/components/automations/types'
 
-async function loadAutomationsFromDisk(rootPath: string): Promise<AutomationListItem[]> {
-  const automationsPath = `${rootPath}/automations.json`
-  const content = await window.electronAPI.readFile(automationsPath)
-  return parseAutomationsConfig(JSON.parse(content))
+async function loadAutomationsFromServer(workspaceId: string): Promise<AutomationListItem[]> {
+  const json = await window.electronAPI.getAutomations(workspaceId)
+  if (!json) return [] // No automations configured yet
+  return parseAutomationsConfig(json)
 }
 
 export interface UseAutomationsResult {
@@ -38,8 +39,8 @@ export interface UseAutomationsResult {
 
 export function useAutomations(
   activeWorkspaceId: string | null | undefined,
-  activeWorkspaceRootPath: string | undefined,
 ): UseAutomationsResult {
+  const { t } = useTranslation()
   const [automations, setAutomations] = useState<AutomationListItem[]>([])
   const [automationTestResults, setAutomationTestResults] = useState<Record<string, TestResult>>({})
   const [automationPendingDelete, setAutomationPendingDelete] = useState<string | null>(null)
@@ -50,26 +51,24 @@ export function useAutomations(
     setAutomationsAtom(automations)
   }, [automations, setAutomationsAtom])
 
-  // Load automations from disk and hydrate lastExecutedAt from history in one step.
+  // Load automations from server and hydrate lastExecutedAt from history in one step.
   // This avoids the race where a config reload wipes timestamps before the
   // history effect can re-merge them.
   const loadAndHydrate = useCallback(async () => {
-    if (!activeWorkspaceRootPath) return
+    if (!activeWorkspaceId) return
     try {
-      const items = await loadAutomationsFromDisk(activeWorkspaceRootPath)
-      if (activeWorkspaceId) {
-        try {
-          const map = await window.electronAPI.getAutomationLastExecuted(activeWorkspaceId)
-          for (const item of items) {
-            item.lastExecutedAt = map[item.id] ?? item.lastExecutedAt
-          }
-        } catch { /* history unavailable — timestamps stay undefined */ }
-      }
+      const items = await loadAutomationsFromServer(activeWorkspaceId)
+      try {
+        const map = await window.electronAPI.getAutomationLastExecuted(activeWorkspaceId)
+        for (const item of items) {
+          item.lastExecutedAt = map[item.id] ?? item.lastExecutedAt
+        }
+      } catch { /* history unavailable — timestamps stay undefined */ }
       setAutomations(items)
     } catch {
       setAutomations([])
     }
-  }, [activeWorkspaceRootPath, activeWorkspaceId])
+  }, [activeWorkspaceId])
 
   // Initial load
   useEffect(() => {
@@ -78,10 +77,10 @@ export function useAutomations(
 
   // Subscribe to live automations updates (when automations.json changes on disk)
   useEffect(() => {
-    if (!activeWorkspaceRootPath) return
+    if (!activeWorkspaceId) return
     const cleanup = window.electronAPI.onAutomationsChanged(() => { loadAndHydrate() })
     return () => { cleanup() }
-  }, [activeWorkspaceRootPath, loadAndHydrate])
+  }, [activeWorkspaceId, loadAndHydrate])
 
   // Shared lookup — avoids repeating automations.find() in every callback
   const findAutomation = useCallback((id: string) => automations.find(h => h.id === id), [automations])
@@ -100,6 +99,7 @@ export function useAutomations(
       actions: automation.actions,
       permissionMode: automation.permissionMode,
       labels: automation.labels,
+      telegramTopic: automation.telegramTopic,
     }).then((result) => {
       const actions = result.actions
       if (!actions || actions.length === 0) {
@@ -132,7 +132,7 @@ export function useAutomations(
       automation.matcherIndex,
       !automation.enabled,
     ).catch(() => {
-      toast.error('Failed to toggle automation')
+      toast.error(t('toast.failedToToggleAutomation'))
     })
   }, [findAutomation, activeWorkspaceId])
 
@@ -140,7 +140,7 @@ export function useAutomations(
     const automation = findAutomation(automationId)
     if (!automation || !activeWorkspaceId) return
     window.electronAPI.duplicateAutomation(activeWorkspaceId, automation.event, automation.matcherIndex)
-      .catch(() => toast.error('Failed to duplicate automation'))
+      .catch(() => toast.error(t('toast.failedToDuplicateAutomation')))
   }, [findAutomation, activeWorkspaceId])
 
   // Delete: show confirmation dialog
@@ -153,7 +153,7 @@ export function useAutomations(
   const confirmDeleteAutomation = useCallback(() => {
     if (!pendingDeleteAutomation || !activeWorkspaceId) return
     window.electronAPI.deleteAutomation(activeWorkspaceId, pendingDeleteAutomation.event, pendingDeleteAutomation.matcherIndex)
-      .catch(() => toast.error('Failed to delete automation'))
+      .catch(() => toast.error(t('toast.failedToDeleteAutomation')))
     setAutomationPendingDelete(null)
   }, [pendingDeleteAutomation, activeWorkspaceId])
 
@@ -195,10 +195,10 @@ export function useAutomations(
     if (!activeWorkspaceId) return
     window.electronAPI.replayAutomation(activeWorkspaceId, automationId, event)
       .then(() => {
-        toast.success('Webhook replay completed')
+        toast.success(t('toast.webhookReplayCompleted'))
       })
       .catch((err: Error) => {
-        toast.error(`Replay failed: ${err.message}`)
+        toast.error(t("toast.replayFailed", { error: err.message }))
       })
   }, [activeWorkspaceId])
 

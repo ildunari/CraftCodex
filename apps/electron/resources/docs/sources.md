@@ -152,6 +152,7 @@ The `source_test` tool:
 2. **Downloads and caches the icon** if a URL was provided
 3. **Tests the connection** to verify the source is reachable
 4. **Reports missing fields** (icon, tagline) that should be added
+5. **Auto-enables the source** (default): on a clean run it flips `enabled: true` in config if needed and activates the source in the current session so its tools become available without a restart. Pass `autoEnable: false` to keep pure validation behavior.
 
 After validation passes, trigger the appropriate auth flow:
 - OAuth sources: `source_oauth_trigger({ sourceSlug: "{slug}" })`
@@ -273,7 +274,7 @@ Each source folder contains:
   // For API sources:
   "api": {
     "baseUrl": "https://api.example.com/",  // MUST have trailing slash
-    "authType": "bearer" | "header" | "query" | "basic" | "none",
+    "authType": "bearer" | "header" | "query" | "basic" | "oauth" | "none",
     "headerName": "X-API-Key",      // For single header auth
     "headerNames": ["X-API-KEY", "X-APP-KEY"],  // For multi-header auth (2+ headers)
     "queryParam": "api_key",         // For query auth
@@ -400,6 +401,20 @@ With environment variables:
 
 REST APIs become flexible tools that Claude can call.
 
+**Request bodies:** By default, `params` is JSON-serialized for POST/PUT/PATCH requests. For endpoints that expect non-JSON bodies (plain text, XML, form data, etc.), use the special `_rawBody` and `_contentType` params:
+
+```json
+{
+  "params": {
+    "_rawBody": "raw string content to send as-is",
+    "_contentType": "text/plain"
+  }
+}
+```
+
+- `_rawBody` (string) — sent as the request body without JSON encoding
+- `_contentType` (string, optional) — sets the Content-Type header (defaults to `text/plain`)
+
 **IMPORTANT:** Authenticated API sources require a `testEndpoint` to validate credentials during `source_test`. Without it, we cannot verify your credentials work.
 
 **Header authentication (X-API-Key style):**
@@ -509,6 +524,61 @@ Common multi-header use cases:
 - **APIs with identity + signing keys**: Separate API key and secret
 - **Services with app + user credentials**: Application key plus user token
 
+**Generic OAuth (authType: 'oauth'):**
+
+For API sources that use OAuth 2.0 but aren't Google, Slack, or Microsoft. Two modes:
+
+**Auto-discovery (recommended):** If the API supports RFC 9728 (OAuth Protected Resource Metadata), just set `authType: "oauth"` — endpoints and client registration are discovered automatically:
+
+```json
+{
+  "name": "Craft Connect",
+  "type": "api",
+  "provider": "craft",
+  "api": {
+    "baseUrl": "https://connect.craft.do/my/api/v1/",
+    "authType": "oauth"
+  }
+}
+```
+
+**Explicit config:** For APIs without standard OAuth metadata (GitHub, Linear, etc.), provide endpoints manually:
+
+```json
+{
+  "name": "GitHub",
+  "type": "api",
+  "provider": "github",
+  "api": {
+    "baseUrl": "https://api.github.com/",
+    "authType": "oauth",
+    "oauth": {
+      "authorizationUrl": "https://github.com/login/oauth/authorize",
+      "tokenUrl": "https://github.com/login/oauth/access_token",
+      "clientId": "Iv1.your_client_id",
+      "clientSecret": "your_client_secret",
+      "scopes": ["repo", "read:user"]
+    }
+  }
+}
+```
+
+The `oauth` block fields (only needed for explicit config):
+- `authorizationUrl` (required): The OAuth authorization endpoint
+- `tokenUrl` (required): The OAuth token exchange endpoint
+- `clientId` (required): Your OAuth app's client ID
+- `clientSecret` (optional): Client secret — not required for public PKCE clients
+- `scopes` (optional): Requested OAuth scopes
+- `audience` (optional): Auth0-style audience parameter
+- `extraParams` (optional): Additional query params for the authorization URL (e.g. `{"access_type": "offline"}`)
+
+To trigger OAuth authentication, use `source_oauth_trigger` (the same tool used for MCP OAuth):
+```typescript
+source_oauth_trigger({ sourceSlug: "github" })
+```
+
+Tokens are sent as `Authorization: Bearer {token}` on every request. Token refresh is automatic when a refresh token is available.
+
 **Basic auth with optional password:**
 
 Some APIs use HTTP Basic Auth but only require the username field (API key), leaving the password empty. For these APIs, use `passwordRequired: false` when prompting for credentials:
@@ -559,6 +629,61 @@ The `testEndpoint` specifies which endpoint to call when validating credentials:
 - `models`, `projects` - List endpoints with minimal data
 
 **Public APIs (authType: 'none')** don't require testEndpoint - we test by hitting the base URL.
+
+### renewEndpoint Configuration (Optional)
+
+The optional `renewEndpoint` enables automatic token renewal for non-OAuth bearer-token APIs. When the token expires, the system calls this endpoint to get a fresh token — no manual re-authentication needed.
+
+```json
+{
+  "api": {
+    "baseUrl": "https://api.example.com/",
+    "authType": "bearer",
+    "renewEndpoint": {
+      "path": "auth/refresh",
+      "method": "POST",
+      "tokenField": "access_token",
+      "expiresInField": "expires_in"
+    }
+  }
+}
+```
+
+**Fields:**
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `path` | Yes | — | Renew URL — relative path (resolved against `baseUrl`) or absolute URL |
+| `method` | No | `"POST"` | HTTP method: `"GET"` or `"POST"` |
+| `body` | No | — | Request body (JSON). Use `{{token}}` as placeholder for the current access token |
+| `headers` | No | — | Extra headers. Use `{{token}}` as placeholder. Merged on top of `defaultHeaders` |
+| `tokenField` | No | `"access_token"` | JSON field name for the new token in the response |
+| `expiresInField` | No | `"expires_in"` | JSON field name for expiry in seconds in the response |
+| `fallbackTtlSecs` | No | — | Fallback TTL in seconds when the response doesn't include expiry info |
+
+**How it works:**
+1. Before each API request, the system checks if the token is expired or expiring soon (within 5 minutes)
+2. If so, it calls the `renewEndpoint` with the current token in the Authorization header
+3. The new token and expiry are extracted from the response and stored
+4. The refreshed token is used for the API request
+
+**Token substitution:** Use `{{token}}` in `body` or `headers` to insert the current access token. This supports nested objects — all string values are scanned recursively.
+
+**Example with token in request body:**
+```json
+{
+  "renewEndpoint": {
+    "path": "auth/refresh",
+    "body": { "current_token": "{{token}}" },
+    "tokenField": "new_token",
+    "expiresInField": "ttl"
+  }
+}
+```
+
+**When `body` is omitted**, the current token is sent via the standard Authorization header (using the source's `authScheme`).
+
+**Note:** This is for APIs with their own token renewal mechanism, not OAuth. For OAuth-based APIs, use `authType: "oauth"` instead.
 
 ### Local Sources
 

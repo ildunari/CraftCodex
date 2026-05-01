@@ -383,7 +383,7 @@ export function useOnboarding({
     const isPiApiKeyFlow = state.apiSetupMethod === 'pi_api_key'
 
     try {
-      // Bedrock — skip API key validation and connection test
+      // Bedrock (Pi+amazon-bedrock) — skip API key validation and connection test
       if (data.bedrockAuthMethod) {
         const saved = await handleSaveConfig(undefined, {
           baseUrl: data.baseUrl,
@@ -706,6 +706,7 @@ export function useOnboarding({
         baseUrl: data.baseUrl,
         connectionDefaultModel: data.model,
         models: data.models,
+        customEndpoint: { api: 'openai-completions' },
       })
 
       if (saved) {

@@ -7,6 +7,7 @@ import type { SessionStatus } from '@/config/session-status-config'
 import type { BackgroundTask } from '../ActiveTasksBar'
 import { ActiveOptionBadges } from '../ActiveOptionBadges'
 import { InputContainer } from './InputContainer'
+import { InputErrorBoundary } from './InputErrorBoundary'
 
 interface ChatInputZoneProps {
   compactMode?: boolean
@@ -49,6 +50,12 @@ export function ChatInputZone({
 }: ChatInputZoneProps) {
   const [autoOpenLabelId, setAutoOpenLabelId] = React.useState<string | null>(null)
   const shouldShowOptionBadges = showOptionBadges ?? !compactMode
+  const inputResetKey = `${sessionId}::${inputProps.structuredInput?.type ?? 'freeform'}`
+
+  const handleClearDraft = React.useCallback(() => {
+    inputProps.onInputChange?.('')
+    inputProps.onAttachmentsChange?.([])
+  }, [inputProps])
 
   const handleLabelAdd = React.useCallback((labelId: string) => {
     const current = sessionLabels || []
@@ -63,7 +70,12 @@ export function ChatInputZone({
   }, [labels, onLabelsChange, sessionLabels])
 
   return (
-    <div className={cn(CHAT_LAYOUT.maxWidth, 'mx-auto w-full px-3 @xs/panel:px-4 mt-1 pb-4', className)}>
+    <div className={cn(
+      CHAT_LAYOUT.maxWidth,
+      'mx-auto w-full mt-1',
+      compactMode ? 'px-2 pb-3' : 'px-3 @xs/panel:px-4 pb-4',
+      className,
+    )}>
       {shouldShowOptionBadges && (
         <ActiveOptionBadges
           permissionMode={permissionMode}
@@ -88,18 +100,24 @@ export function ChatInputZone({
         />
       )}
 
-      <InputContainer
-        {...inputProps}
-        compactMode={compactMode}
-        permissionMode={permissionMode}
-        onPermissionModeChange={onPermissionModeChange}
-        labels={labels}
-        sessionLabels={sessionLabels}
-        onLabelAdd={handleLabelAdd}
-        sessionFolderPath={sessionFolderPath}
+      <InputErrorBoundary
         sessionId={sessionId}
-        currentSessionStatus={currentSessionStatus}
-      />
+        resetKey={inputResetKey}
+        onClearDraft={handleClearDraft}
+      >
+        <InputContainer
+          {...inputProps}
+          compactMode={compactMode}
+          permissionMode={permissionMode}
+          onPermissionModeChange={onPermissionModeChange}
+          labels={labels}
+          sessionLabels={sessionLabels}
+          onLabelAdd={handleLabelAdd}
+          sessionFolderPath={sessionFolderPath}
+          sessionId={sessionId}
+          currentSessionStatus={currentSessionStatus}
+        />
+      </InputErrorBoundary>
     </div>
   )
 }

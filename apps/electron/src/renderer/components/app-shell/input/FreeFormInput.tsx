@@ -139,6 +139,10 @@ export interface FreeFormInputProps {
   inputValue?: string
   /** Callback when input value changes */
   onInputChange?: (value: string) => void
+  /** Current attachments - if provided by the parent draft store */
+  attachmentsValue?: FileAttachment[]
+  /** Callback when attachments change */
+  onAttachmentsChange?: (attachments: FileAttachment[]) => void
   /** When true, removes container styling (shadow, bg, rounded) - used when wrapped by InputContainer */
   unstyled?: boolean
   /** Callback when component height changes (for external animation sync) */
@@ -234,6 +238,8 @@ export function FreeFormInput({
   enabledModes = ['safe', 'ask', 'allow-all'],
   inputValue,
   onInputChange,
+  attachmentsValue,
+  onAttachmentsChange,
   unstyled = false,
   onHeightChange,
   onFocusChange,
@@ -313,13 +319,19 @@ export function FreeFormInput({
   // Sync FROM parent on mount/change (for restoring drafts)
   // Sync TO parent on blur/submit (debounced persistence)
   const [input, setInput] = React.useState(inputValue ?? '')
-  const [attachments, setAttachments] = React.useState<FileAttachment[]>([])
+  const [attachments, setAttachments] = React.useState<FileAttachment[]>(attachmentsValue ?? [])
 
   // Ref to track current attachments for use in event handlers (avoids stale closure issues)
   const attachmentsRef = React.useRef<FileAttachment[]>([])
   React.useEffect(() => {
     attachmentsRef.current = attachments
+    onAttachmentsChange?.(attachments)
   }, [attachments])
+
+  React.useEffect(() => {
+    if (!attachmentsValue) return
+    setAttachments(attachmentsValue)
+  }, [attachmentsValue])
 
   // Optimistic state for source selection - updates UI immediately before IPC round-trip completes
   const [optimisticSourceSlugs, setOptimisticSourceSlugs] = React.useState(enabledSourceSlugs)

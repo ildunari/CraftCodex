@@ -4,7 +4,9 @@ import { Maximize2 } from 'lucide-react'
 import { cn } from '../../lib/utils'
 import { CodeBlock } from './CodeBlock'
 import { MermaidPreviewOverlay } from '../overlay/MermaidPreviewOverlay'
+import { normalizeMermaidSource } from './mermaid-source'
 import { useScrollFade } from './useScrollFade'
+import { useTranslation } from 'react-i18next'
 
 // ============================================================================
 // MarkdownMermaidBlock — renders mermaid code fences as SVG diagrams.
@@ -57,13 +59,14 @@ interface MarkdownMermaidBlockProps {
 }
 
 export function MarkdownMermaidBlock({ code, className, showExpandButton = true, tapToOpen = true, minHeight }: MarkdownMermaidBlockProps) {
+  const { t } = useTranslation()
   // Render synchronously — no flash between CodeBlock and SVG.
   // Colors are CSS variable references so the SVG inherits from the app's theme
   // via CSS cascade. Theme switches apply automatically without re-rendering.
   const { svg, error } = React.useMemo(() => {
     try {
       return {
-        svg: renderMermaidSVG(code, {
+        svg: renderMermaidSVG(normalizeMermaidSource(code), {
           bg: 'var(--background)',
           fg: 'var(--foreground)',
           accent: 'var(--accent)',
@@ -195,7 +198,7 @@ export function MarkdownMermaidBlock({ code, className, showExpandButton = true,
               "text-muted-foreground/50 hover:text-foreground",
               "focus:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:opacity-100"
             )}
-            title="View Fullscreen"
+            title={t('common.viewFullscreen')}
           >
             <Maximize2 className="w-3.5 h-3.5" />
           </button>

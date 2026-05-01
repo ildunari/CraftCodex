@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect, forwardRef, type ReactNode } 
 import { ChevronLeft, ChevronRight, RotateCw, X, Globe } from 'lucide-react'
 import { AnimatePresence, motion } from 'motion/react'
 import { cn } from '../../lib/utils'
+import { useTranslation } from 'react-i18next'
 import { Spinner } from './LoadingIndicator'
 
 /* ------------------------------------------------------------------ */
@@ -163,6 +164,7 @@ export function BrowserControls({
   themeColor,
   className,
 }: BrowserControlsProps) {
+  const { t } = useTranslation()
   const [localUrl, setLocalUrl] = useState(controlledUrl ?? '')
   const [isFocused, setIsFocused] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -224,7 +226,7 @@ export function BrowserControls({
   /* Shared: reload / stop button */
   const reloadButton = (
     <NavButton
-      aria-label={loading ? 'Stop loading' : 'Reload'}
+      aria-label={loading ? t('browser.stopLoading') : t('common.reload')}
       onClick={loading ? onStop : onReload}
     >
       {loading ? (
@@ -247,7 +249,7 @@ export function BrowserControls({
           onFocus={handleFocus}
           onBlur={handleBlur}
           onKeyDown={handleKeyDown}
-          placeholder="Enter URL or search…"
+          placeholder={t('browser.urlPlaceholder')}
           className={cn(
             'w-full rounded-[8px] bg-transparent px-3 pl-8 text-[13px] text-foreground/70 outline-none transition-all',
             compact ? 'h-[28px]' : 'h-[30px]',
@@ -331,10 +333,10 @@ export function BrowserControls({
       )}
       {leadingContent}
 
-      <NavButton aria-label="Back" disabled={!canGoBack} onClick={onGoBack} style={safeThemeColor ? { color: 'var(--tb-fg)' } : undefined}>
+      <NavButton aria-label={t('common.back')} disabled={!canGoBack} onClick={onGoBack} style={safeThemeColor ? { color: 'var(--tb-fg)' } : undefined}>
         <ChevronLeft className="h-[18px] w-[18px] text-foreground/70" style={safeThemeColor ? { color: 'inherit' } : undefined} strokeWidth={1.5} />
       </NavButton>
-      <NavButton aria-label="Forward" disabled={!canGoForward} onClick={onGoForward} style={safeThemeColor ? { color: 'var(--tb-fg)' } : undefined}>
+      <NavButton aria-label={t('common.forward')} disabled={!canGoForward} onClick={onGoForward} style={safeThemeColor ? { color: 'var(--tb-fg)' } : undefined}>
         <ChevronRight className="h-[18px] w-[18px] text-foreground/70" style={safeThemeColor ? { color: 'inherit' } : undefined} strokeWidth={1.5} />
       </NavButton>
 

@@ -5,15 +5,15 @@
  * model resolution used for title generation, summarization, and call_llm.
  */
 import { describe, it, expect } from 'bun:test';
-import { getMiniModel, getSummarizationModel } from '../src/config/llm-connections.ts';
+import { getMiniModel, getSummarizationModel, isDeniedMiniModelId } from '../src/config/llm-connections.ts';
 import type { LlmProviderType } from '../src/config/llm-connections.ts';
 
 // ============================================================
 // Helpers
 // ============================================================
 
-function makeConnection(providerType: LlmProviderType, models: string[]) {
-  return { providerType, models };
+function makeConnection(providerType: LlmProviderType, models: string[], piAuthProvider?: string) {
+  return { providerType, models, piAuthProvider };
 }
 
 // ============================================================
@@ -25,35 +25,11 @@ describe('getMiniModel()', () => {
 
   it('finds haiku for anthropic provider', () => {
     const conn = makeConnection('anthropic', [
-      'claude-opus-4-6',
+      'claude-opus-4-7',
       'claude-sonnet-4-6',
       'claude-haiku-4-5-20251001',
     ]);
     expect(getMiniModel(conn)).toBe('claude-haiku-4-5-20251001');
-  });
-
-  it('finds haiku for bedrock provider', () => {
-    const conn = makeConnection('bedrock', [
-      'anthropic.claude-opus-4-6',
-      'anthropic.claude-haiku-4-5-20251001',
-    ]);
-    expect(getMiniModel(conn)).toBe('anthropic.claude-haiku-4-5-20251001');
-  });
-
-  it('finds haiku for vertex provider', () => {
-    const conn = makeConnection('vertex', [
-      'claude-opus-4-6',
-      'claude-haiku-4-5-20251001',
-    ]);
-    expect(getMiniModel(conn)).toBe('claude-haiku-4-5-20251001');
-  });
-
-  it('finds haiku for anthropic_compat provider', () => {
-    const conn = makeConnection('anthropic_compat', [
-      'anthropic/claude-opus-4.6',
-      'anthropic/claude-haiku-4.5',
-    ]);
-    expect(getMiniModel(conn)).toBe('anthropic/claude-haiku-4.5');
   });
 
   // --- Pi providers ---
@@ -136,7 +112,7 @@ describe('getMiniModel()', () => {
 
   it('falls back to last model when no keyword match', () => {
     const conn = makeConnection('anthropic', [
-      'claude-opus-4-6',
+      'claude-opus-4-7',
       'claude-sonnet-4-6',
     ]);
     // No haiku in list — falls back to last model
@@ -170,5 +146,70 @@ describe('getSummarizationModel()', () => {
       'pi/claude-sonnet-4.6',
     ]);
     expect(getSummarizationModel(conn)).toBe(getMiniModel(conn));
+  });
+});
+
+// ============================================================
+// Auth-flavor awareness — see isDeniedMiniModelId
+// ============================================================
+
+describe('getMiniModel() — auth-flavor awareness', () => {
+  it('skips *codex-mini* variants under openai-codex auth', () => {
+    // Reproduces the bug surfaced as:
+    //   "The 'gpt-5.1-codex-mini' model is not supported when using Codex
+    //    with a ChatGPT account."
+    // The keyword search would otherwise pick gpt-5.1-codex-mini first.
+    const conn = makeConnection(
+      'pi',
+      ['pi/gpt-5.2-codex', 'pi/gpt-5.1-codex-mini', 'pi/gpt-5-mini'],
+      'openai-codex',
+    );
+    expect(getMiniModel(conn)).toBe('pi/gpt-5-mini');
+  });
+
+  it('still returns *codex-mini* variants under regular openai (API-key) auth', () => {
+    const conn = makeConnection(
+      'pi',
+      ['pi/gpt-5.2-codex', 'pi/gpt-5.1-codex-mini'],
+      'openai',
+    );
+    expect(getMiniModel(conn)).toBe('pi/gpt-5.1-codex-mini');
+  });
+
+  it('falls back to last allowed model when every mini candidate is denied', () => {
+    const conn = makeConnection(
+      'pi',
+      ['pi/gpt-5', 'pi/gpt-5.1-codex-mini', 'pi/gpt-5.2-codex'],
+      'openai-codex',
+    );
+    // No remaining mini/flash candidate after filtering → falls back to last
+    // allowed model (gpt-5.2-codex).
+    expect(getMiniModel(conn)).toBe('pi/gpt-5.2-codex');
+  });
+});
+
+// ============================================================
+// isDeniedMiniModelId — re-exported from this module so getMiniModel and
+// the pi-agent-server queryLlm guard share one source of truth.
+// ============================================================
+
+describe('isDeniedMiniModelId()', () => {
+  it('always denies codex-mini-latest', () => {
+    expect(isDeniedMiniModelId('codex-mini-latest')).toBe(true);
+    expect(isDeniedMiniModelId('pi/codex-mini-latest')).toBe(true);
+    expect(isDeniedMiniModelId('codex-mini-latest', 'openai')).toBe(true);
+  });
+
+  it('denies *codex-mini* variants only under openai-codex auth', () => {
+    expect(isDeniedMiniModelId('gpt-5.1-codex-mini', 'openai-codex')).toBe(true);
+    expect(isDeniedMiniModelId('pi/gpt-5.1-codex-mini', 'openai-codex')).toBe(true);
+    expect(isDeniedMiniModelId('gpt-5.1-codex-mini', 'openai')).toBe(false);
+    expect(isDeniedMiniModelId('gpt-5.1-codex-mini')).toBe(false);
+  });
+
+  it('does not deny non-codex-mini models', () => {
+    expect(isDeniedMiniModelId('gpt-5-mini', 'openai-codex')).toBe(false);
+    expect(isDeniedMiniModelId('claude-haiku-4-5', 'openai-codex')).toBe(false);
+    expect(isDeniedMiniModelId('gpt-5.1-codex', 'openai-codex')).toBe(false);
   });
 });

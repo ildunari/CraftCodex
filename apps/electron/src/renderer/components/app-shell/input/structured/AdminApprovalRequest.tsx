@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { useTranslation } from 'react-i18next'
 import { ShieldAlert, Check, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
@@ -33,6 +34,7 @@ export function AdminApprovalRequest({
   onCancel,
   unstyled = false,
 }: AdminApprovalRequestProps) {
+  const { t } = useTranslation()
   const [rememberChoice, setRememberChoice] = React.useState(false)
 
   const rememberForMinutes = request.rememberForMinutes ?? 10
@@ -50,11 +52,11 @@ export function AdminApprovalRequest({
           : 'border border-info/30 rounded-[8px] shadow-middle'
       )}
     >
-      <div className="p-4 space-y-3 flex-1 min-h-0 flex flex-col">
+      <div className="p-4 space-y-3 flex-1 min-h-0 flex flex-col overflow-y-auto">
         <div className="space-y-2 pb-1">
           <div className="flex items-center gap-1.5 text-sm font-medium text-foreground">
             <ShieldAlert className="h-3.5 w-3.5 text-info" />
-            <span>Admin approval required</span>
+            <span>{t('chat.adminApprovalRequired')}</span>
           </div>
           <div className="text-xs leading-[18px] text-muted-foreground">
             Installing <span className="font-medium text-foreground">{request.appName}</span> needs your Mac admin approval.
@@ -75,7 +77,7 @@ export function AdminApprovalRequest({
         </div>
       </div>
 
-      <div className="flex items-center gap-2 px-3 py-2 border-t border-border/50">
+      <div className="shrink-0 flex flex-wrap items-center gap-2 px-3 py-2 border-t border-border/50">
         <Button
           size="sm"
           variant="default"
@@ -96,7 +98,7 @@ export function AdminApprovalRequest({
           Cancel
         </Button>
 
-        <div className="flex-1" />
+        <div className="min-w-0 flex-1" />
 
         <div className="flex items-center gap-2">
           <Switch

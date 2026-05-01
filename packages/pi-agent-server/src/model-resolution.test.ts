@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { resolvePiModel } from './model-resolution.ts';
+import { resolvePiModel, isDeniedMiniModelId, isModelNotFoundError } from './model-resolution.ts';
 
 /**
  * Minimal mock of PiModelRegistry.
@@ -133,5 +133,130 @@ describe('resolvePiModel', () => {
       const result = resolvePiModel(registry, 'nonexistent-model');
       expect(result).toBeUndefined();
     });
+  });
+
+  describe('provider-safe fallback', () => {
+    it('does not return a model from an incompatible provider via getAll fallback', () => {
+      // gpt-5.4 exists under azure-openai-responses but NOT github-copilot.
+      // With github-copilot auth, the fallback must not return the azure model.
+      const registry = createMockRegistry({
+        'github-copilot': [{ id: 'gpt-5.3-codex', name: 'GPT-5.3-Codex', provider: 'github-copilot' }],
+        'azure-openai-responses': [{ id: 'gpt-5.4', name: 'GPT-5.4', provider: 'azure-openai-responses' }],
+      });
+
+      const result = resolvePiModel(registry, 'gpt-5.4', 'github-copilot');
+      expect(result).toBeUndefined();
+    });
+
+    it('returns same-provider model from getAll fallback when exact lookup misses', () => {
+      const registry = {
+        find() {
+          return undefined;
+        },
+        getAll() {
+          return [{ id: 'gpt-5.4', name: 'GPT-5.4', provider: 'github-copilot' }];
+        },
+      } as any;
+
+      const result = resolvePiModel(registry, 'gpt-5.4', 'github-copilot');
+      expect(result).toBeDefined();
+      expect(result!.provider).toBe('github-copilot');
+    });
+
+    it('allows custom-endpoint models regardless of piAuthProvider', () => {
+      const registry = createMockRegistry({
+        'custom-endpoint': [{ id: 'my-model', name: 'My Model', provider: 'custom-endpoint' }],
+        'github-copilot': [],
+      });
+
+      const result = resolvePiModel(registry, 'my-model', 'github-copilot');
+      expect(result).toBeDefined();
+      expect(result!.provider).toBe('custom-endpoint');
+    });
+
+    it('does not filter by provider when piAuthProvider is not set', () => {
+      const registry = createMockRegistry({
+        'azure-openai-responses': [{ id: 'gpt-5.4', name: 'GPT-5.4', provider: 'azure-openai-responses' }],
+      });
+
+      const result = resolvePiModel(registry, 'gpt-5.4');
+      expect(result).toBeDefined();
+      expect(result!.provider).toBe('azure-openai-responses');
+    });
+
+    it('skips incompatible providers in the common-provider fallback loop', () => {
+      // Model findable via the 'openai' common provider, but piAuthProvider is 'github-copilot'
+      const registry = {
+        find(provider: string, modelId: string) {
+          if (provider === 'openai' && modelId === 'gpt-5.4') {
+            return { id: 'gpt-5.4', name: 'GPT-5.4', provider: 'openai' };
+          }
+          return undefined;
+        },
+        getAll() { return []; },
+      } as any;
+
+      const result = resolvePiModel(registry, 'gpt-5.4', 'github-copilot');
+      expect(result).toBeUndefined();
+    });
+  });
+});
+
+describe('isDeniedMiniModelId', () => {
+  it('denies codex-mini-latest regardless of auth provider', () => {
+    expect(isDeniedMiniModelId('codex-mini-latest')).toBe(true);
+    expect(isDeniedMiniModelId('pi/codex-mini-latest')).toBe(true);
+    expect(isDeniedMiniModelId('codex-mini-latest', 'openai')).toBe(true);
+    expect(isDeniedMiniModelId('codex-mini-latest', 'openai-codex')).toBe(true);
+  });
+
+  it('denies *codex-mini* variants when piAuthProvider is openai-codex (ChatGPT account)', () => {
+    expect(isDeniedMiniModelId('gpt-5.1-codex-mini', 'openai-codex')).toBe(true);
+    expect(isDeniedMiniModelId('pi/gpt-5.1-codex-mini', 'openai-codex')).toBe(true);
+    expect(isDeniedMiniModelId('gpt-5.2-codex-mini-preview', 'openai-codex')).toBe(true);
+  });
+
+  it('allows *codex-mini* variants when piAuthProvider is a regular openai API key', () => {
+    expect(isDeniedMiniModelId('gpt-5.1-codex-mini', 'openai')).toBe(false);
+    expect(isDeniedMiniModelId('pi/gpt-5.1-codex-mini', 'openai')).toBe(false);
+  });
+
+  it('allows non-codex-mini models under openai-codex auth', () => {
+    expect(isDeniedMiniModelId('gpt-5.1-codex', 'openai-codex')).toBe(false);
+    expect(isDeniedMiniModelId('gpt-5-mini', 'openai-codex')).toBe(false);
+    expect(isDeniedMiniModelId('claude-haiku-4-5', 'openai-codex')).toBe(false);
+  });
+
+  it('treats unset piAuthProvider as unrestricted (only the hardcoded denylist applies)', () => {
+    expect(isDeniedMiniModelId('gpt-5.1-codex-mini')).toBe(false);
+    expect(isDeniedMiniModelId('gpt-5-mini')).toBe(false);
+  });
+});
+
+describe('isModelNotFoundError', () => {
+  it('matches the ChatGPT-account Codex refusal', () => {
+    expect(
+      isModelNotFoundError(
+        "The 'gpt-5.1-codex-mini' model is not supported when using Codex with a ChatGPT account.",
+      ),
+    ).toBe(true);
+  });
+
+  it('matches classic OpenAI model_not_found shapes', () => {
+    expect(isModelNotFoundError('The model `gpt-99` does not exist')).toBe(true);
+    expect(isModelNotFoundError('Error code: model_not_found')).toBe(true);
+    expect(isModelNotFoundError('No such model: foo-bar')).toBe(true);
+    expect(isModelNotFoundError('The requested model is not available or does not exist')).toBe(true);
+  });
+
+  it('is case-insensitive', () => {
+    expect(isModelNotFoundError('MODEL_NOT_FOUND')).toBe(true);
+    expect(isModelNotFoundError('Is Not Supported')).toBe(true);
+  });
+
+  it('does not match unrelated errors', () => {
+    expect(isModelNotFoundError('rate limit exceeded')).toBe(false);
+    expect(isModelNotFoundError('invalid api key')).toBe(false);
+    expect(isModelNotFoundError('')).toBe(false);
   });
 });

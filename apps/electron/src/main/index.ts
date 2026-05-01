@@ -58,6 +58,10 @@ Sentry.init({
   },
 })
 
+// Initialize i18n for main process (menus, dialogs, etc.)
+import { setupI18n, i18n } from '@craft-agent/shared/i18n'
+setupI18n()
+
 // Set anonymous machine ID for Sentry user tracking (no PII — just a hash).
 // Uses hostname + homedir to produce a stable per-machine identifier.
 const machineId = createHash('sha256').update(hostname() + homedir()).digest('hex').slice(0, 16)
@@ -72,7 +76,9 @@ import { registerCoreRpcHandlers, cleanupSessionFileWatchForClient } from '@craf
 import type { PlatformServices } from '../runtime/platform'
 import { createElectronPlatform } from './platform'
 import type { HandlerDeps } from './handlers/handler-deps'
-import { bootstrapServer } from '@craft-agent/server-core/bootstrap'
+import { bootstrapServer, releaseServerLock } from '@craft-agent/server-core/bootstrap'
+import { createMessagingBootstrap, type MessagingBootstrapHandle } from '@craft-agent/messaging-gateway'
+import { getCredentialManager } from '@craft-agent/shared/credentials'
 import { initModelRefreshService, getModelRefreshService, setFetcherPlatform } from '@craft-agent/server-core/model-fetchers'
 import { setSearchPlatform, setImageProcessor } from '@craft-agent/server-core/services'
 import { createApplicationMenu } from './menu'
@@ -91,7 +97,7 @@ import { handleDeepLink } from './deep-link'
 import { BrowserPaneManager } from './browser-pane-manager'
 import { OAuthFlowStore } from '@craft-agent/shared/auth'
 import { registerThumbnailScheme, registerThumbnailHandler } from './thumbnail-protocol'
-import log, { isDebugMode, mainLog, getLogFilePath } from './logger'
+import log, { isDebugMode, mainLog, getLogFilePath, getMessagingGatewayLogFilePath, messagingGatewayLog } from './logger'
 import { setPerfEnabled, enableDebug } from '@craft-agent/shared/utils'
 import { registerPiModelResolver } from '@craft-agent/shared/config'
 import { getPiModelsForAuthProvider, getAllPiModels } from '@craft-agent/shared/config'
@@ -186,6 +192,13 @@ let browserPaneManager: BrowserPaneManager | null = null
 let oauthFlowStore: OAuthFlowStore | null = null
 let moduleSink: EventSink | null = null
 let moduleClientResolver: ((webContentsId: number) => string | undefined) | null = null
+
+// Messaging gateway: the bootstrap handle is created once sessionManager is
+// available (inside createHandlerDeps) and populated with the WS publisher
+// after bootstrapServer resolves. Both hosts (Electron + standalone) wire
+// through createMessagingBootstrap — do not construct MessagingGatewayRegistry
+// directly.
+let messagingHandle: MessagingBootstrapHandle | null = null
 
 // Store pending deep link if app not ready yet (cold start)
 let pendingDeepLink: string | null = null
@@ -622,13 +635,43 @@ app.whenReady().then(async () => {
           sm.setBrowserPaneManager(browserPaneManager!)
           return sm
         },
-        createHandlerDeps: ({ sessionManager: sm, platform: p, oauthFlowStore: ofs }) => ({
-          sessionManager: sm,
-          platform: p,
-          windowManager: windowManager ?? undefined,
-          browserPaneManager: browserPaneManager ?? undefined,
-          oauthFlowStore: ofs,
-        }),
+        createHandlerDeps: ({ sessionManager: sm, platform: p, oauthFlowStore: ofs }) => {
+          // The messaging handle is built here because it needs sessionManager.
+          // The WS publisher is attached after bootstrapServer resolves (via
+          // handle.setPublisher) because wsServer isn't available yet.
+          messagingHandle = createMessagingBootstrap({
+            sessionManager: sm,
+            credentialManager: getCredentialManager(),
+            getMessagingDir: (wsId: string) =>
+              join(homedir(), '.craft-agent', 'workspaces', wsId, 'messaging'),
+            getLegacyMessagingDir: (wsId: string) => {
+              const ws = getWorkspaces().find((w) => w.id === wsId)
+              return ws ? join(ws.rootPath, 'messaging') : undefined
+            },
+            // Route messaging diagnostics through the dedicated messaging log
+            // at ~/.craft-agent/logs/messaging-gateway.log.
+            logger: messagingGatewayLog,
+            // WhatsApp worker runs under Electron's embedded Node via
+            // ELECTRON_RUN_AS_NODE (WhatsAppAdapter defaults nodeBin to
+            // process.execPath). In dev we resolve worker.cjs from the
+            // monorepo; in packaged builds it's shipped via extraResources
+            // (see apps/electron/electron-builder.yml).
+            whatsapp: {
+              workerEntry: app.isPackaged
+                ? join(process.resourcesPath, 'messaging-whatsapp-worker', 'worker.cjs')
+                : join(process.cwd(), 'packages', 'messaging-whatsapp-worker', 'dist', 'worker.cjs'),
+              pairingMode: 'qr',
+            },
+          })
+          return {
+            sessionManager: sm,
+            platform: p,
+            windowManager: windowManager ?? undefined,
+            browserPaneManager: browserPaneManager ?? undefined,
+            oauthFlowStore: ofs,
+            messagingRegistry: messagingHandle.registry,
+          }
+        },
         // Headless: register only core handlers (no GUI handlers for browser, settings, etc.)
         // GUI: register all handlers (core + GUI)
         registerAllRpcHandlers: isHeadless
@@ -667,6 +710,36 @@ app.whenReady().then(async () => {
       moduleSink = instance.wsServer.push.bind(instance.wsServer)
       moduleClientResolver = resolveClientId
 
+      // -----------------------------------------------------------------------
+      // Messaging Gateway — attach the WS publisher, init local workspaces,
+      // install the fan-out event sink. The handle was created inside
+      // createHandlerDeps so the registry could be wired into HandlerDeps.
+      // -----------------------------------------------------------------------
+      try {
+        if (!messagingHandle) {
+          throw new Error('Messaging handle was not constructed in createHandlerDeps')
+        }
+
+        messagingHandle.setPublisher(instance.wsServer.push.bind(instance.wsServer))
+
+        // Skip remote-owned workspaces — messaging runs on the remote server.
+        const localWorkspaceIds = getWorkspaces()
+          .filter((ws) => !ws.remoteServer)
+          .map((ws) => ws.id)
+        await messagingHandle.initializeWorkspaces(localWorkspaceIds)
+
+        // Compose fan-out event sink: RPC push + messaging gateway dispatch.
+        // Always install — this lets workspaces enable messaging at runtime
+        // without a process restart.
+        const baseSink = instance.wsServer.push.bind(instance.wsServer)
+        instance.sessionManager.setEventSink(messagingHandle.wrapSink(baseSink))
+        if (messagingHandle.registry.size > 0) {
+          mainLog.info(`[messaging] Fan-out sink active for ${messagingHandle.registry.size} workspace(s)`)
+        }
+      } catch (err) {
+        mainLog.error('[messaging] Gateway initialization failed:', err)
+      }
+
       // IPC handlers — preload uses sendSync to get WS connection details
 
       // Remove workspace from config (cleanup stale entries)
@@ -687,10 +760,120 @@ app.whenReady().then(async () => {
         }
       })
 
+      // Transfer session to another workspace — orchestrated in main process
+      // so large bundles can be moved directly between owning servers.
+      ipcMain.handle('session:transferToRemoteWorkspace', async (_event, sessionId: string, targetWorkspaceId: string, sessionIndex?: number, sessionCount?: number) => {
+        const idx = sessionIndex ?? 0
+        const count = sessionCount ?? 1
+        const { getWorkspaceByNameOrId } = await import('@craft-agent/shared/config')
+        const { connectToRemote } = await import('./handlers/workspace')
+        const { CHUNKED_TRANSFER_THRESHOLD, getChunkCount, invokeChunked, prepareChunkedPayload } = await import('./chunked-rpc')
+
+        const targetWorkspace = getWorkspaceByNameOrId(targetWorkspaceId)
+        if (!targetWorkspace?.remoteServer) throw new Error(`Workspace ${targetWorkspaceId} has no remote server`)
+        if (!sessionManager) throw new Error('Session manager not initialized')
+
+        const sourceWorkspaceLocalId = windowManager?.getWorkspaceForWindow(_event.sender.id)
+        if (!sourceWorkspaceLocalId) throw new Error('Unable to resolve source workspace for transfer')
+
+        const sourceWorkspace = getWorkspaceByNameOrId(sourceWorkspaceLocalId)
+        if (!sourceWorkspace) throw new Error(`Source workspace ${sourceWorkspaceLocalId} not found`)
+
+        let bundle: any = null
+
+        if (sourceWorkspace.remoteServer) {
+          const { url: sourceUrl, token: sourceToken, remoteWorkspaceId: sourceRemoteWorkspaceId } = sourceWorkspace.remoteServer
+          console.log(`[Transfer] Exporting remote-owned session ${sessionId} from workspace ${sourceRemoteWorkspaceId}...`)
+          const { client: sourceClient, error: sourceError } = await connectToRemote(sourceUrl, sourceToken, sourceRemoteWorkspaceId)
+          if (!sourceClient) throw new Error(sourceError ?? 'Connection failed to source remote server')
+
+          try {
+            bundle = await sourceClient.invoke('sessions:export', sessionId)
+            if (!bundle) throw new Error(`Failed to export session ${sessionId}`)
+
+            try {
+              console.log('[Transfer] Generating conversation summary on source server...')
+              const transferPayload = await sourceClient.invoke('sessions:exportRemoteTransfer', sessionId)
+              if (transferPayload?.summary && bundle.session?.header) {
+                ;(bundle.session.header as any).transferredSessionSummary = transferPayload.summary
+                ;(bundle.session.header as any).transferredSessionSummaryApplied = false
+                console.log(`[Transfer] Summary generated: ${transferPayload.summary.length} chars`)
+              }
+            } catch (err) {
+              console.warn('[Transfer] Source-server summary generation failed:', err)
+            }
+          } finally {
+            sourceClient.destroy()
+          }
+        } else {
+          console.log(`[Transfer] Exporting local-owned session ${sessionId} from workspace ${sourceWorkspace.id}...`)
+          bundle = await sessionManager.exportSession(sessionId, sourceWorkspace.id)
+          if (!bundle) throw new Error(`Failed to export session ${sessionId}`)
+
+          try {
+            console.log('[Transfer] Generating conversation summary...')
+            const transferPayload = await sessionManager.exportRemoteSessionTransfer(sessionId, sourceWorkspace.id)
+            if (transferPayload?.summary && bundle.session?.header) {
+              ;(bundle.session.header as any).transferredSessionSummary = transferPayload.summary
+              ;(bundle.session.header as any).transferredSessionSummaryApplied = false
+              console.log(`[Transfer] Summary generated: ${transferPayload.summary.length} chars`)
+            }
+          } catch (err) {
+            console.warn('[Transfer] Summary generation failed:', err)
+          }
+        }
+
+        console.log(`[Transfer] Export complete: ${bundle.session?.messages?.length ?? 0} messages, ${bundle.files?.length ?? 0} files`)
+
+        const { url, token, remoteWorkspaceId } = targetWorkspace.remoteServer
+        console.log(`[Transfer] Connecting to target remote server: ${url}`)
+        const { client, error } = await connectToRemote(url, token, remoteWorkspaceId)
+        if (!client) throw new Error(error ?? 'Connection failed to target remote server')
+        console.log('[Transfer] Connected to target remote server')
+
+        try {
+          const preparedBundle = prepareChunkedPayload(bundle)
+          const payloadSize = preparedBundle.bytes.length
+          const payloadMB = (payloadSize / (1024 * 1024)).toFixed(1)
+
+          const emitProgress = (chunkSent: number, chunkTotal: number) => {
+            try { _event.sender.send('transfer:progress', { sessionIndex: idx, sessionCount: count, chunkSent, chunkTotal }) } catch { /* renderer may be gone */ }
+          }
+
+          if (payloadSize < CHUNKED_TRANSFER_THRESHOLD) {
+            console.log(`[Transfer] Bundle size: ${payloadMB}MB (< 5MB threshold) → using direct RPC`)
+            emitProgress(0, 1)
+            const result = await client.invoke('sessions:import', remoteWorkspaceId, bundle, 'fork')
+            emitProgress(1, 1)
+            return result
+          }
+
+          const chunkCount = getChunkCount(payloadSize)
+          console.log(`[Transfer] Bundle size: ${payloadMB}MB (>= 5MB threshold) → using chunked transfer (${chunkCount} chunks)`)
+          return await invokeChunked(
+            client,
+            'sessions:import',
+            [remoteWorkspaceId, bundle, 'fork'],
+            1,
+            emitProgress,
+            preparedBundle,
+          )
+        } finally {
+          client.destroy()
+        }
+      })
+
       // App relaunch (for server config changes — NOT an update install)
       ipcMain.handle('app:relaunch', () => {
         app.relaunch()
         app.exit(0)
+      })
+
+      // Language change: sync from renderer to main process and rebuild native menu
+      ipcMain.handle('i18n:changeLanguage', async (_event, lang: string) => {
+        i18n.changeLanguage(lang)
+        const { rebuildMenu } = await import('./menu')
+        await rebuildMenu()
       })
 
       ipcMain.on('__get-ws-port', (e) => {
@@ -879,6 +1062,7 @@ app.whenReady().then(async () => {
     if (isDebugMode) {
       mainLog.info('Debug mode enabled - logs at:', getLogFilePath())
     }
+    mainLog.info('Messaging gateway log path:', getMessagingGatewayLogFilePath())
   } catch (error) {
     mainLog.error('Failed to initialize app:', error instanceof Error ? error.message : error, (error as any)?.stack)
     // Continue anyway - the app will show errors in the UI
@@ -966,9 +1150,22 @@ app.on('before-quit', async (event) => {
     // Stop all model refresh timers
     getModelRefreshService().stopAll()
 
+    // Stop messaging gateways so the WhatsApp worker subprocess exits cleanly.
+    if (messagingHandle) {
+      try {
+        await messagingHandle.dispose()
+      } catch (err) {
+        mainLog.error('[messaging] dispose failed:', err)
+      }
+    }
+
     // Clean up power manager (release power blocker)
     const { cleanup: cleanupPowerManager } = await import('./power-manager')
     cleanupPowerManager()
+
+    // Release the server lock file so the next launch doesn't see a stale PID.
+    // This must happen regardless of the exit path (normal quit or update quit).
+    releaseServerLock()
 
     // If update is in progress, let electron-updater handle the quit flow
     // Force exit breaks the NSIS installer on Windows

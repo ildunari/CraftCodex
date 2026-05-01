@@ -35,6 +35,7 @@ import { CodeBlock } from './CodeBlock'
 import { PDFPreviewOverlay } from '../overlay/PDFPreviewOverlay'
 import { ItemNavigator } from '../overlay/ItemNavigator'
 import { usePlatform } from '../../context/PlatformContext'
+import { useTranslation } from 'react-i18next'
 import 'react-pdf/dist/Page/AnnotationLayer.css'
 import 'react-pdf/dist/Page/TextLayer.css'
 
@@ -81,6 +82,7 @@ export interface MarkdownPdfBlockProps {
 }
 
 export function MarkdownPdfBlock({ code, className, onCreateRegionAnnotation: _onCreateRegionAnnotation }: MarkdownPdfBlockProps) {
+  const { t } = useTranslation()
   const { onReadFileBinary } = usePlatform()
 
   // Parse the JSON spec — supports single src or items array
@@ -172,7 +174,7 @@ export function MarkdownPdfBlock({ code, className, onCreateRegionAnnotation: _o
         <div className="px-3 py-2 bg-muted/50 border-b flex items-center gap-2">
           <FileText className="w-3.5 h-3.5 text-muted-foreground/50" />
           <span className="text-[12px] text-muted-foreground font-medium flex-1">
-            {spec.title || 'PDF Preview'}
+            {spec.title || t('preview.pdfPreview')}
           </span>
           <div className="flex items-center gap-1">
             <ItemNavigator items={items} activeIndex={activeIndex} onSelect={setActiveIndex} />
@@ -185,7 +187,7 @@ export function MarkdownPdfBlock({ code, className, onCreateRegionAnnotation: _o
                 "focus:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:opacity-100",
                 hasMultiple ? "opacity-100" : "opacity-0 group-hover:opacity-100"
               )}
-              title="View Fullscreen"
+              title={t('common.viewFullscreen')}
             >
               <Maximize2 className="w-3.5 h-3.5" />
             </button>
@@ -199,8 +201,8 @@ export function MarkdownPdfBlock({ code, className, onCreateRegionAnnotation: _o
             <div className="flex items-start justify-center bg-white p-4">
               <Document
                 file={activeFileObj}
-                loading={<div className="py-8 text-center text-muted-foreground text-[13px]">Rendering...</div>}
-                error={<div className="py-6 text-center text-destructive/70 text-[13px]">Failed to render PDF</div>}
+                loading={<div className="py-8 text-center text-muted-foreground text-[13px]">{t('common.rendering')}</div>}
+                error={<div className="py-6 text-center text-destructive/70 text-[13px]">{t('preview.failedToRenderPdf')}</div>}
               >
                 <Page
                   pageNumber={1}
@@ -214,7 +216,7 @@ export function MarkdownPdfBlock({ code, className, onCreateRegionAnnotation: _o
 
           {/* Loading state for uncached active item */}
           {!activePdfData && loading && (
-            <div className="py-8 text-center text-muted-foreground text-[13px]">Loading...</div>
+            <div className="py-8 text-center text-muted-foreground text-[13px]">{t('common.loading')}</div>
           )}
 
           {/* Error state for uncached active item */}

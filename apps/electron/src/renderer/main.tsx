@@ -8,7 +8,13 @@ import App from './App'
 import { ThemeProvider } from './context/ThemeContext'
 import { windowWorkspaceIdAtom } from './atoms/sessions'
 import { Toaster } from '@/components/ui/sonner'
+import { setupI18n } from '@craft-agent/shared/i18n'
+import { initReactI18next } from 'react-i18next'
+import LanguageDetector from 'i18next-browser-languagedetector'
 import './index.css'
+
+// Initialize i18n before any React rendering
+setupI18n([LanguageDetector, initReactI18next])
 
 // Known-harmless console messages that should NOT be sent to Sentry.
 // These are dev-mode noise or expected warnings that aren't actionable.
@@ -30,7 +36,7 @@ const IGNORED_CONSOLE_PATTERNS = [
 // NOTE: Source map upload is intentionally disabled — see main/index.ts for details.
 sentryInit(
   {
-    integrations: [captureConsoleIntegration({ levels: ['error'] })],
+    integrations: [captureConsoleIntegration({ levels: ['error'] }) as any],
 
     beforeSend(event) {
       // Drop events matching known-harmless console patterns to avoid Sentry quota waste
@@ -63,7 +69,7 @@ sentryInit(
       return event
     },
   },
-  Sentry.init,
+  Sentry.init as any,
 )
 
 /**

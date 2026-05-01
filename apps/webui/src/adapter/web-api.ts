@@ -8,6 +8,9 @@
  * on the WebSocket upgrade request — no bearer token needed.
  */
 
+import i18n from 'i18next'
+import { toast } from 'sonner'
+import { openExternalUrl } from '@craft-agent/ui'
 import { WsRpcClient } from '../../../electron/src/transport/client'
 import { buildClientApi } from '../../../electron/src/transport/build-api'
 import { CHANNEL_MAP } from '../../../electron/src/transport/channel-map'
@@ -84,7 +87,16 @@ export function createWebApi(options: WebApiOptions): {
   const webOverrides: Partial<ElectronAPI> = {
     // Shell operations — use browser APIs
     openUrl: (url: string) => {
-      window.open(url, '_blank', 'noopener,noreferrer')
+      const result = openExternalUrl(url)
+      if (!result.opened) {
+        if (result.reason === 'dangerous') {
+          toast.error(`Blocked unsafe URL (${result.detail})`)
+        } else if (result.reason === 'internal-deeplink') {
+          console.warn('[openUrl] craftagents:// deep links require the desktop app')
+        } else {
+          console.warn('[openUrl] Malformed URL:', url)
+        }
+      }
       return Promise.resolve()
     },
     openFile: () => Promise.resolve(), // no-op in browser
@@ -141,16 +153,17 @@ export function createWebApi(options: WebApiOptions): {
       window.open(`${window.location.origin}/?session=${sessionId}`, '_blank')
     },
 
-    // Auto-update — not applicable to web
-    checkForUpdates: () => Promise.resolve({ available: false, version: '', releaseNotes: '' } as any),
-    getUpdateInfo: () => Promise.resolve({ available: false, version: '', releaseNotes: '' } as any),
+    // Auto-update — not applicable to web (but expose server version for About page)
+    checkForUpdates: () => Promise.resolve({ available: false, currentVersion: client.getServerVersion() ?? '' } as any),
+    getUpdateInfo: () => Promise.resolve({ available: false, currentVersion: client.getServerVersion() ?? '' } as any),
     installUpdate: () => Promise.resolve(),
     dismissUpdate: () => Promise.resolve(),
     getDismissedUpdateVersion: () => Promise.resolve(null),
     onUpdateAvailable: () => () => {},
     onUpdateDownloadProgress: () => () => {},
-    getReleaseNotes: () => Promise.resolve(''),
-    getLatestReleaseVersion: () => Promise.resolve(undefined),
+    // Release notes — serve from server via RPC (same content as Electron)
+    getReleaseNotes: () => client.invoke('releaseNotes:get') as Promise<string>,
+    getLatestReleaseVersion: () => client.invoke('releaseNotes:getLatestVersion') as Promise<string | undefined>,
 
     // Menu events — register as keyboard shortcuts
     onMenuNewChat: () => () => {},
@@ -200,8 +213,8 @@ export function createWebApi(options: WebApiOptions): {
     openSkillInFinder: () => Promise.resolve(),
 
     // Confirmation dialogs — use browser confirm()
-    showLogoutConfirmation: () => Promise.resolve(window.confirm('Are you sure you want to log out?')),
-    showDeleteSessionConfirmation: (name: string) => Promise.resolve(window.confirm(`Delete session "${name}"?`)),
+    showLogoutConfirmation: () => Promise.resolve(window.confirm(i18n.t('dialog.logoutConfirmation'))),
+    showDeleteSessionConfirmation: (name: string) => Promise.resolve(window.confirm(i18n.t('dialog.deleteSessionConfirmation', { name }))),
 
     // Power settings — not applicable
     getKeepAwakeWhileRunning: () => Promise.resolve(false),
@@ -224,15 +237,83 @@ export function createWebApi(options: WebApiOptions): {
   // OAuth overrides — web-compatible browser opening
   // The Electron preload uses shell.openExternal() which isn't available in browsers.
   const oauthOverrides: Partial<ElectronAPI> = {
-    // Claude OAuth — server returns authUrl, we open it in a new tab
+    // Generic source OAuth — server prepares the flow, we open the auth URL in a new tab.
+    // The OAuth provider redirects through the relay to our server's /api/oauth/callback,
+    // which completes the token exchange and pushes status via WebSocket.
+    performOAuth: async (args: {
+      sourceSlug: string
+      sessionId?: string
+      authRequestId?: string
+    }) => {
+      // iOS Safari (and any strict mobile pop-up blocker) requires
+      // `window.open()` to be called *synchronously* inside the click event
+      // — any preceding `await` loses the user-gesture and the call is
+      // silently blocked. We pre-open a blank tab here as the first thing
+      // in this async function (which still runs on the click tick, before
+      // the first await) and rewrite its `location.href` once the auth URL
+      // arrives. Same-window fallback covers users who blocked popups
+      // entirely. NOTE: dropped `noopener` because the spec returns null
+      // for `noopener` opens in some browsers, defeating the pre-open.
+      const popup = window.open('about:blank', '_blank')
+
+      try {
+        const callbackUrl = `${window.location.origin}/api/oauth/callback`
+        const result = await client.invoke('oauth:start', {
+          sourceSlug: args.sourceSlug,
+          callbackUrl,
+          sessionId: args.sessionId,
+          authRequestId: args.authRequestId,
+        })
+
+        if (popup && !popup.closed) {
+          // Happy path — pre-opened popup is still open, redirect it.
+          popup.location.href = result.authUrl
+        } else if (popup === null) {
+          // Popup blocked entirely (popup === null) — fall back to a
+          // same-window redirect. The OAuth callback lands back on the
+          // WebUI; cookie-based session means the user picks up where
+          // they left off after auth.
+          window.location.href = result.authUrl
+        } else {
+          // Popup was opened but the user closed it while we waited for
+          // the RPC. Abort rather than redirecting their main tab.
+          return {
+            success: false,
+            error: 'Sign-in window was closed before authentication started.',
+          }
+        }
+
+        // The server completes the flow when the callback arrives and pushes
+        // auth status via WebSocket — the AuthRequestCard updates automatically.
+        return { success: true }
+      } catch (err) {
+        if (popup && !popup.closed) popup.close()
+        return {
+          success: false,
+          error: err instanceof Error ? err.message : 'OAuth flow failed',
+        }
+      }
+    },
+
+    // Claude OAuth — server returns authUrl, we open it in a new tab.
+    // Same iOS-safe pre-open pattern as `performOAuth` above.
     startClaudeOAuth: async () => {
+      const popup = window.open('about:blank', '_blank')
       try {
         const result = await client.invoke('onboarding:startClaudeOAuth')
         if (result.success && result.authUrl) {
-          window.open(result.authUrl, '_blank', 'noopener')
+          if (popup && !popup.closed) {
+            popup.location.href = result.authUrl
+          } else {
+            window.location.href = result.authUrl
+          }
+        } else if (popup && !popup.closed) {
+          // No auth URL — close the placeholder we opened on the click.
+          popup.close()
         }
         return result
       } catch (err) {
+        if (popup && !popup.closed) popup.close()
         return {
           success: false,
           error: err instanceof Error ? err.message : 'Claude OAuth failed',
@@ -244,7 +325,7 @@ export function createWebApi(options: WebApiOptions): {
     startChatGptOAuth: async () => {
       return {
         success: false,
-        error: 'ChatGPT OAuth is not available in the web UI. Use the desktop app or set up an API key instead.',
+        error: i18n.t('errors.chatGptOAuthNotAvailable'),
       }
     },
   }

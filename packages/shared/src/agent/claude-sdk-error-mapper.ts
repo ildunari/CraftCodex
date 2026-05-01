@@ -1,6 +1,7 @@
 import type { SDKAssistantMessageError } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentError } from './errors.ts';
 import type { LastApiError } from '../interceptor-common.ts';
+import { getProviderMetadata, getProviderDisplayName } from '../config/provider-metadata.ts';
 
 export interface ClaudeSdkApiError {
   errorType: string;
@@ -11,6 +12,8 @@ export interface ClaudeSdkApiError {
 export interface ClaudeSdkErrorContext {
   actualError: ClaudeSdkApiError | null;
   capturedApiError: LastApiError | null;
+  providerType?: string;
+  piAuthProvider?: string;
 }
 
 type FailureKind = 'provider' | 'network' | 'unknown';
@@ -37,6 +40,26 @@ const NETWORK_HINTS = [
   'connection reset',
   'connection refused',
 ] as const;
+
+// Signals that an invalid_request error is caused by the 1M context beta
+// (the user's API tier doesn't support it, or the request exceeded even 1M).
+// Anthropic's error strings evolve — match on multiple hints.
+const ONE_M_CONTEXT_HINTS = [
+  'context-1m',
+  'context_1m',
+  'context window',
+  'context_window',
+  'tier',
+  'exceeds the context',
+] as const;
+
+function isOneMContextError(context: ClaudeSdkErrorContext): boolean {
+  const haystack = [
+    normalize(context.capturedApiError?.message),
+    normalize(context.actualError?.message),
+  ].join(' ');
+  return includesAny(haystack, ONE_M_CONTEXT_HINTS);
+}
 
 function normalize(value?: string | null): string {
   return value?.toLowerCase() ?? '';
@@ -126,6 +149,10 @@ export function mapClaudeSdkAssistantError(
 ): AgentError {
   const apiDetails = buildApiDetails(context);
   const failureKind = classifyFailure(errorCode, context);
+  const providerInfo = getProviderMetadata(
+    context.providerType ?? 'anthropic',
+    context.piAuthProvider,
+  ) ?? undefined;
 
   const retryAction = [{ key: 'r', label: 'Retry', action: 'retry' as const }];
 
@@ -140,6 +167,7 @@ export function mapClaudeSdkAssistantError(
     actions: retryAction,
     canRetry: true,
     retryDelayMs: 5000,
+    providerInfo,
   };
 
   const networkError: AgentError = {
@@ -154,6 +182,7 @@ export function mapClaudeSdkAssistantError(
     actions: retryAction,
     canRetry: true,
     retryDelayMs: 2000,
+    providerInfo,
   };
 
   switch (errorCode) {
@@ -169,6 +198,7 @@ export function mapClaudeSdkAssistantError(
         ],
         canRetry: true,
         retryDelayMs: 1000,
+        providerInfo,
       };
 
     case 'billing_error':
@@ -179,6 +209,7 @@ export function mapClaudeSdkAssistantError(
         details: ['Check your account billing status'],
         actions: [{ key: 's', label: 'Update credentials', action: 'settings' }],
         canRetry: false,
+        providerInfo,
       };
 
     case 'rate_limit':
@@ -190,9 +221,29 @@ export function mapClaudeSdkAssistantError(
         actions: retryAction,
         canRetry: true,
         retryDelayMs: 5000,
+        providerInfo,
       };
 
     case 'invalid_request':
+      if (isOneMContextError(context)) {
+        return {
+          code: 'invalid_request',
+          title: '1M Context Not Available',
+          message: 'The request exceeded the standard 200K context window, and 1M context is not available on your API tier.',
+          details: [
+            ...apiDetails,
+            'Disable "Extended Context (1M)" in AI Settings → Performance',
+            'Or start a new conversation, or run /compact to reduce context',
+          ],
+          actions: [
+            { key: 's', label: 'Settings', action: 'settings' },
+            { key: 'r', label: 'Retry', action: 'retry' },
+          ],
+          canRetry: true,
+          retryDelayMs: 1000,
+          providerInfo,
+        };
+      }
       return {
         code: 'invalid_request',
         title: 'Invalid Request',
@@ -205,6 +256,7 @@ export function mapClaudeSdkAssistantError(
         actions: retryAction,
         canRetry: true,
         retryDelayMs: 1000,
+        providerInfo,
       };
 
     case 'server_error':
@@ -219,6 +271,7 @@ export function mapClaudeSdkAssistantError(
         actions: retryAction,
         canRetry: true,
         retryDelayMs: 1000,
+        providerInfo,
       };
 
     case 'unknown': {
@@ -242,6 +295,7 @@ export function mapClaudeSdkAssistantError(
         actions: retryAction,
         canRetry: true,
         retryDelayMs: 2000,
+        providerInfo,
       };
     }
 
@@ -258,6 +312,7 @@ export function mapClaudeSdkAssistantError(
         actions: retryAction,
         canRetry: true,
         retryDelayMs: 2000,
+        providerInfo,
       };
   }
 }

@@ -9,6 +9,7 @@
  * primitives, following the same dual-menu pattern as SourceMenu.
  */
 
+import { useTranslation } from 'react-i18next'
 import {
   Trash2,
   FileCode,
@@ -16,6 +17,7 @@ import {
   Play,
   Power,
   PowerOff,
+  Send,
 } from 'lucide-react'
 import { useMenuComponents } from '@/components/ui/menu-context'
 
@@ -28,6 +30,8 @@ export interface AutomationMenuProps {
   onDuplicate?: () => void
   onEditJson?: () => void
   onDelete?: () => void
+  /** Send to another workspace (omit to hide the option) */
+  onSendToWorkspace?: () => void
 }
 
 export function AutomationMenu({
@@ -39,8 +43,10 @@ export function AutomationMenu({
   onDuplicate,
   onEditJson,
   onDelete,
+  onSendToWorkspace,
 }: AutomationMenuProps) {
   const { MenuItem, Separator } = useMenuComponents()
+  const { t } = useTranslation()
 
   return (
     <>
@@ -52,7 +58,7 @@ export function AutomationMenu({
           ) : (
             <Power className="h-3.5 w-3.5" />
           )}
-          <span className="flex-1">{enabled ? 'Disable' : 'Enable'}</span>
+          <span className="flex-1">{enabled ? t('automations.menuDisable') : t('automations.menuEnable')}</span>
         </MenuItem>
       )}
 
@@ -60,7 +66,7 @@ export function AutomationMenu({
       {onTest && (
         <MenuItem onClick={onTest}>
           <Play className="h-3.5 w-3.5" />
-          <span className="flex-1">Run Test</span>
+          <span className="flex-1">{t('automations.runTest')}</span>
         </MenuItem>
       )}
 
@@ -68,7 +74,15 @@ export function AutomationMenu({
       {onDuplicate && (
         <MenuItem onClick={onDuplicate}>
           <Copy className="h-3.5 w-3.5" />
-          <span className="flex-1">Duplicate</span>
+          <span className="flex-1">{t('automations.menuDuplicate')}</span>
+        </MenuItem>
+      )}
+
+      {/* Send to another workspace */}
+      {onSendToWorkspace && (
+        <MenuItem onClick={onSendToWorkspace}>
+          <Send className="h-3.5 w-3.5" />
+          <span className="flex-1">Send to Workspace</span>
         </MenuItem>
       )}
 
@@ -76,7 +90,7 @@ export function AutomationMenu({
       {onEditJson && (
         <MenuItem onClick={onEditJson}>
           <FileCode className="h-3.5 w-3.5" />
-          <span className="flex-1">Edit Configuration</span>
+          <span className="flex-1">{t('automations.menuEditConfiguration')}</span>
         </MenuItem>
       )}
 
@@ -86,7 +100,7 @@ export function AutomationMenu({
       {onDelete && (
         <MenuItem onClick={onDelete} variant="destructive">
           <Trash2 className="h-3.5 w-3.5" />
-          <span className="flex-1">Delete</span>
+          <span className="flex-1">{t('automations.menuDelete')}</span>
         </MenuItem>
       )}
     </>

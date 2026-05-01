@@ -20,7 +20,7 @@ import { cn } from '@/lib/utils'
 import { ConnectionIcon } from '@/components/icons/ConnectionIcon'
 import { getModelDisplayName } from '@config/models'
 import { resolveEffectiveConnectionSlug, isCompatProvider } from '@config/llm-connections'
-import { type ThinkingLevel, THINKING_LEVELS, getThinkingLevelName } from '@craft-agent/shared/agent/thinking-levels'
+import { type ThinkingLevel, THINKING_LEVELS } from '@craft-agent/shared/agent/thinking-levels'
 import type { AgentBackendCapabilities, LlmConnectionWithStatus, NativeCapabilitySyncManifest } from '../../../../shared/types'
 import {
   getModelEntriesForConnection,
@@ -43,6 +43,19 @@ function formatTokenCount(tokens: number): string {
     return `${(tokens / 1000).toFixed(tokens >= 10000 ? 0 : 1)}k`
   }
   return tokens.toString()
+}
+
+const THINKING_LEVEL_LABELS: Record<ThinkingLevel, { name: string; description: string }> = {
+  off: { name: 'Off', description: 'No extended reasoning' },
+  low: { name: 'Low', description: 'Light reasoning, faster responses' },
+  medium: { name: 'Medium', description: 'Balanced reasoning depth' },
+  high: { name: 'High', description: 'Deep reasoning for complex tasks' },
+  xhigh: { name: 'XHigh', description: 'Extra-high reasoning depth' },
+  max: { name: 'Max', description: 'Maximum reasoning effort' },
+}
+
+function getThinkingLevelLabel(level: ThinkingLevel): string {
+  return THINKING_LEVEL_LABELS[level]?.name ?? level
 }
 
 interface AgentModelSelectorProps {
@@ -343,13 +356,14 @@ export function AgentModelSelector({
             <DropdownMenuSub>
               <StyledDropdownMenuSubTrigger disabled={thinkingDisabled} className={cn('flex items-center justify-between px-2 py-2 rounded-lg', thinkingDisabled && 'opacity-50 cursor-not-allowed')}>
                 <div className="text-left flex-1">
-                  <div className="font-medium text-sm">{getThinkingLevelName(thinkingLevel)}</div>
+                  <div className="font-medium text-sm">{getThinkingLevelLabel(thinkingLevel)}</div>
                   <div className="text-xs text-muted-foreground">{thinkingDisabled ? 'Not supported by this model' : 'Extended reasoning depth'}</div>
                 </div>
               </StyledDropdownMenuSubTrigger>
               <StyledDropdownMenuSubContent className="min-w-[220px]">
-                {THINKING_LEVELS.map(({ id, name, description }) => {
+                {THINKING_LEVELS.map(({ id }) => {
                   const isSelected = thinkingLevel === id
+                  const copy = THINKING_LEVEL_LABELS[id]
                   return (
                     <StyledDropdownMenuItem
                       key={id}
@@ -357,8 +371,8 @@ export function AgentModelSelector({
                       className="flex items-center justify-between px-2 py-2 rounded-lg cursor-pointer"
                     >
                       <div className="text-left">
-                        <div className="font-medium text-sm">{name}</div>
-                        <div className="text-xs text-muted-foreground">{description}</div>
+                        <div className="font-medium text-sm">{copy.name}</div>
+                        <div className="text-xs text-muted-foreground">{copy.description}</div>
                       </div>
                       {isSelected && (
                         <Check className="h-3 w-3 text-foreground shrink-0 ml-3" />

@@ -6,7 +6,8 @@
  */
 
 import * as React from 'react'
-import { PauseCircle, AlertCircle } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
+import { PauseCircle, AlertCircle, Hash } from 'lucide-react'
 import {
   Info_Page,
   Info_Section,
@@ -53,13 +54,34 @@ export function AutomationInfoPage({
   onReplay,
   className,
 }: AutomationInfoPageProps) {
+  const { t } = useTranslation()
   const workspace = useActiveWorkspace()
   const nextRuns = automation.cron ? computeNextRuns(automation.cron) : []
+
+  // Lightweight per-mount fetch — mirrors the pattern used in MessagingSettingsPage.
+  // Only fired when the matcher actually declares a topic to avoid unnecessary IPC.
+  const [hasSupergroup, setHasSupergroup] = React.useState<boolean | null>(null)
+  React.useEffect(() => {
+    if (!automation.telegramTopic) {
+      setHasSupergroup(null)
+      return
+    }
+    let cancelled = false
+    void window.electronAPI.getMessagingSupergroup().then((sg) => {
+      if (!cancelled) setHasSupergroup(Boolean(sg?.chatId))
+    }).catch(() => {
+      if (!cancelled) setHasSupergroup(false)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [automation.telegramTopic])
+
   const editActions = workspace?.rootPath ? (
     <EditPopover
       trigger={<EditButton />}
       {...getEditConfig('automation-config', workspace.rootPath)}
-      secondaryAction={{ label: 'Edit File', filePath: `${workspace.rootPath}/automations.json` }}
+      secondaryAction={{ label: t('automations.editFile'), filePath: `${workspace.rootPath}/automations.json` }}
     />
   ) : undefined
 
@@ -94,28 +116,28 @@ export function AutomationInfoPage({
         {/* Disabled warning */}
         {!automation.enabled && (
           <Info_Alert variant="warning" icon={<PauseCircle className="h-4 w-4" />}>
-            <Info_Alert.Title>Paused</Info_Alert.Title>
+            <Info_Alert.Title>{t('automations.pausedTitle')}</Info_Alert.Title>
             <Info_Alert.Description>
-              This automation is turned off. Enable it to start running again.
+              {t('automations.pausedDescription')}
             </Info_Alert.Description>
           </Info_Alert>
         )}
 
         {/* Section: When */}
         <Info_Section
-          title="When"
-          description="What causes this automation to run"
+          title={t('automations.sectionWhen')}
+          description={t('automations.sectionWhenDescription')}
           actions={editActions}
         >
           <Info_Table>
-            <Info_Table.Row label="Event">
+            <Info_Table.Row label={t('automations.labelEvent')}>
               <Info_Badge color="default">{getEventDisplayName(automation.event)}</Info_Badge>
             </Info_Table.Row>
-            <Info_Table.Row label="Timing">
+            <Info_Table.Row label={t('automations.labelTiming')}>
               <PhaseBadge event={automation.event} />
             </Info_Table.Row>
             {automation.matcher && (
-              <Info_Table.Row label="Only when matching">
+              <Info_Table.Row label={t('automations.labelOnlyWhenMatching')}>
                 <code className="text-xs font-mono bg-foreground/5 px-1.5 py-0.5 rounded">
                   {automation.matcher}
                 </code>
@@ -123,14 +145,14 @@ export function AutomationInfoPage({
             )}
             {automation.cron && (
               <>
-                <Info_Table.Row label="Repeats" value={describeCron(automation.cron)} />
-                <Info_Table.Row label="Schedule expression">
+                <Info_Table.Row label={t('automations.labelRepeats')} value={describeCron(automation.cron)} />
+                <Info_Table.Row label={t('automations.labelScheduleExpression')}>
                   <code className="text-xs font-mono bg-foreground/5 px-1.5 py-0.5 rounded">
                     {automation.cron}
                   </code>
                 </Info_Table.Row>
                 {nextRuns.length > 0 && (
-                  <Info_Table.Row label="Next runs">
+                  <Info_Table.Row label={t('automations.labelNextRuns')}>
                     <div className="flex flex-col gap-0.5">
                       {(() => {
                         const spansYears = nextRuns.length > 1 && nextRuns[0].getFullYear() !== nextRuns[nextRuns.length - 1].getFullYear()
@@ -144,7 +166,7 @@ export function AutomationInfoPage({
                     </div>
                   </Info_Table.Row>
                 )}
-                <Info_Table.Row label="Timezone" value={automation.timezone || 'System default'} />
+                <Info_Table.Row label={t('automations.labelTimezone')} value={automation.timezone || t('automations.systemDefault')} />
               </>
             )}
           </Info_Table>
@@ -153,8 +175,8 @@ export function AutomationInfoPage({
         {/* Section: If (conditions) — hidden when empty */}
         {automation.conditions && automation.conditions.length > 0 && (
           <Info_Section
-            title="If"
-            description="Conditions that must pass before actions run"
+            title={t('automations.sectionIf')}
+            description={t('automations.sectionIfDescription')}
             actions={editActions}
           >
             <Info_Table>
@@ -171,8 +193,8 @@ export function AutomationInfoPage({
 
         {/* Section: Then */}
         <Info_Section
-          title="Then"
-          description={`${automation.actions.length} action${automation.actions.length !== 1 ? 's' : ''} to perform`}
+          title={t('automations.sectionThen')}
+          description={t('automations.sectionThenDescription', { count: automation.actions.length })}
           actions={editActions}
         >
           <div className="divide-y divide-border/30">
@@ -188,20 +210,35 @@ export function AutomationInfoPage({
         )}
 
         {/* Section: Settings */}
-        <Info_Section title="Settings" actions={editActions}>
+        <Info_Section title={t('automations.sectionSettings')} actions={editActions}>
           <Info_Table>
-            <Info_Table.Row label="Access Level" value={getPermissionDisplayName(automation.permissionMode)} />
-            <Info_Table.Row label="Status">
+            <Info_Table.Row label={t('automations.labelAccessLevel')} value={getPermissionDisplayName(automation.permissionMode)} />
+            <Info_Table.Row label={t('automations.labelStatus')}>
               <Info_Badge color={automation.enabled ? 'success' : 'muted'}>
-                {automation.enabled ? 'Active' : 'Disabled'}
+                {automation.enabled ? t('automations.statusActive') : t('automations.statusDisabled')}
               </Info_Badge>
             </Info_Table.Row>
             {automation.labels && automation.labels.length > 0 && (
-              <Info_Table.Row label="Labels">
+              <Info_Table.Row label={t('automations.labelLabels')}>
                 <div className="flex gap-1.5 flex-wrap">
                   {automation.labels.map((l) => (
                     <Info_Badge key={l} color="muted">{l}</Info_Badge>
                   ))}
+                </div>
+              </Info_Table.Row>
+            )}
+            {automation.telegramTopic && (
+              <Info_Table.Row label={t('automations.labelTelegramTopic')}>
+                <div className="flex flex-col gap-1">
+                  <div className="inline-flex items-center gap-1.5 text-foreground">
+                    <Hash className="size-3.5 text-foreground/50" />
+                    <span className="font-mono text-xs">{automation.telegramTopic}</span>
+                  </div>
+                  <span className="text-xs text-foreground/50">
+                    {hasSupergroup === false
+                      ? t('automations.telegramTopicHintNoSupergroup')
+                      : t('automations.telegramTopicHintBound')}
+                  </span>
                 </div>
               </Info_Table.Row>
             )}
@@ -210,14 +247,14 @@ export function AutomationInfoPage({
 
         {/* Section: Recent Activity */}
         <Info_Section
-          title="Recent Activity"
-          description={executions.length > 0 ? `Last ${executions.length} runs` : undefined}
+          title={t('automations.sectionRecentActivity')}
+          description={executions.length > 0 ? t('automations.lastNRuns', { count: executions.length }) : undefined}
         >
           <AutomationEventTimeline entries={executions} onReplay={onReplay} />
         </Info_Section>
 
         {/* Section: Raw config (JSON) */}
-        <Info_Section title="Raw config">
+        <Info_Section title={t('automations.sectionRawConfig')}>
           <div className="rounded-[8px] shadow-minimal overflow-hidden [&_pre]:!bg-transparent [&_.relative]:!bg-transparent [&_.relative]:!border-0 [&_.relative>div:first-child]:!bg-transparent [&_.relative>div:first-child]:!border-0">
             <Info_Markdown maxHeight={300} fullscreen>
               {`\`\`\`json\n${JSON.stringify({
@@ -228,6 +265,7 @@ export function AutomationInfoPage({
                 timezone: automation.timezone,
                 permissionMode: automation.permissionMode,
                 labels: automation.labels,
+                telegramTopic: automation.telegramTopic,
                 enabled: automation.enabled,
                 actions: automation.actions,
               }, null, 2)}\n\`\`\``}

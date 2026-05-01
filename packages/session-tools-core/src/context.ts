@@ -307,6 +307,72 @@ export interface SessionToolContext {
   updatePreferences?(updates: Record<string, unknown>): void;
 
   // ============================================================
+  // Session Self-Management (for set_session_labels, etc.)
+  // ============================================================
+
+  /** Set labels on a session. Defaults to current session if no ID given. Injected by backend. */
+  setSessionLabels?(sessionId: string | undefined, labels: string[]): void | Promise<void>;
+
+  /** Set status on a session. Defaults to current session if no ID given. Injected by backend. */
+  setSessionStatus?(sessionId: string | undefined, status: string): void | Promise<void>;
+
+  /** Get detailed info about a session. Defaults to current session if no ID given. Injected by backend. */
+  getSessionInfo?(sessionId?: string): SessionInfo | null;
+
+  /** List sessions in the workspace with pagination. Injected by backend. */
+  listSessions?(options?: ListSessionsOptions): ListSessionsResult;
+
+  /** Resolve label display names to IDs against configured labels. Injected by backend. */
+  resolveLabels?(labels: string[]): ResolvedLabelsResult;
+
+  /** Resolve a status display name to its ID against configured statuses. Injected by backend. */
+  resolveStatus?(status: string): ResolvedStatusResult;
+
+  // ============================================================
+  // Inter-Session Messaging
+  // ============================================================
+
+  /** Send a message to another session. Injected by backend (SessionManager). */
+  sendAgentMessage?(sessionId: string, message: string, attachments?: Array<{ path: string; name?: string }>): Promise<void>;
+
+  /**
+   * Activate a source in the running session: add to enabledSourceSlugs,
+   * build its MCP/API servers, apply to the agent.
+   *
+   * Only available in backends that run alongside SessionManager (Claude in-process, Pi subprocess).
+   * Codex and other backends leave this undefined — callers should degrade gracefully (restart required).
+   *
+   * `availability` is always `'next-turn'` when activation succeeds: both Claude SDK
+   * (frozen `mcpServers` at `query()` start) and Pi (subprocess reloads proxy tools
+   * on the next `handlePrompt`) require the current turn to end before new tools
+   * are callable. The backend handles this via the existing source_activated + auto_retry
+   * machinery — the current turn is aborted and the renderer resends the user's
+   * original message with a `[{slug} activated]` suffix.
+   */
+  activateSourceInSession?(sourceSlug: string): Promise<{
+    ok: boolean;
+    reason?: string;
+    availability?: 'next-turn';
+  }>;
+
+  // ============================================================
+  // Messaging Gateway (for list/unbind messaging channels)
+  // ============================================================
+
+  /** Get messaging bindings for a session. Injected by backend when messaging is configured. */
+  getMessagingBindings?(sessionId: string): Array<{
+    platform: string;
+    channelId: string;
+    /** Telegram supergroup forum topic id; undefined for DMs / non-Telegram. */
+    threadId?: number;
+    channelName?: string;
+    enabled: boolean;
+  }>;
+
+  /** Unbind messaging channels from a session. Returns count of removed bindings. */
+  unbindMessagingChannel?(sessionId: string, platform?: string): number;
+
+  // ============================================================
   // Session Paths (for transform_data / render_template)
   // ============================================================
 
@@ -321,6 +387,79 @@ export interface SessionToolContext {
    * Used by transform_data and render_template for output files.
    */
   dataPath?: string;
+}
+
+// ============================================================
+// Session Self-Management Types — Resolution
+// ============================================================
+
+/** Result of resolving label names/IDs against configured labels. */
+export interface ResolvedLabelsResult {
+  /** Resolved label IDs (ready to store) */
+  resolved: string[];
+  /** Labels that couldn't be matched to any configured label */
+  unknown: string[];
+  /** All valid label IDs (for error messages) */
+  available: string[];
+  /**
+   * Optional per-input rejection reason, keyed by the original input string.
+   * Populated by `resolveSessionLabels()` from `@craft-agent/shared/labels`.
+   * Handlers use this to build clearer errors (e.g. "label X doesn't accept a value").
+   */
+  reasons?: Record<string, string>;
+}
+
+/** Result of resolving a status name/ID against configured statuses. */
+export interface ResolvedStatusResult {
+  /** Matched status ID, or null if unknown */
+  resolved: string | null;
+  /** All valid status IDs (for error messages) */
+  available: string[];
+}
+
+// ============================================================
+// Session Self-Management Types
+// ============================================================
+
+/** Full metadata for a single session (returned by get_session_info). */
+export interface SessionInfo {
+  id: string;
+  name: string;
+  labels: string[];
+  status: string;
+  permissionMode: string;
+  createdAt: number;
+  updatedAt?: number;
+  workingDirectory?: string;
+  llmConnection?: string;
+  model?: string;
+  isActive: boolean;
+}
+
+/** Compact session summary (returned by list_sessions). */
+export interface SessionListItem {
+  id: string;
+  name: string;
+  labels: string[];
+  status: string;
+  createdAt: number;
+}
+
+/** Options for list_sessions filtering and pagination. */
+export interface ListSessionsOptions {
+  status?: string;
+  label?: string;
+  search?: string;
+  sortBy?: 'recent' | 'name' | 'status';
+  limit?: number;
+  offset?: number;
+}
+
+/** Paginated result from list_sessions. */
+export interface ListSessionsResult {
+  total: number;
+  returned: number;
+  sessions: SessionListItem[];
 }
 
 // ============================================================

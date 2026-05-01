@@ -42,6 +42,13 @@ export interface EntityRowProps {
   /** Content rendered inline after the title (e.g. timestamp). On hover, swapped with the more button.
    *  When set, the title row becomes single-line (truncated) and the absolute more button is hidden. */
   titleTrailing?: React.ReactNode
+  /** Content rendered inline immediately after the title, on the same row.
+   *  Lives between the title and the trailing slot. Use for tiny, high-priority
+   *  inline chips (e.g. platform bindings) that should read as part of the title
+   *  area, not as badges below. `shrink-0` so long titles truncate first. */
+  titleSuffix?: React.ReactNode
+  /** Optional subtitle line beneath the title */
+  subtitle?: React.ReactNode
   /** Badge/subtitle row beneath the title */
   badges?: React.ReactNode
   /** Right-aligned content in the badge row (timestamp, child toggle) */
@@ -88,6 +95,8 @@ export function EntityRow({
   title,
   titleClassName,
   titleTrailing,
+  titleSuffix,
+  subtitle,
   badges,
   trailing,
   children,
@@ -146,16 +155,20 @@ export function EntityRow({
               <div className={cn("font-sans truncate min-w-0", titleClassName)}>
                 {title}
               </div>
+              {titleSuffix && <div className="shrink-0 flex items-center">{titleSuffix}</div>}
               <div className="shrink-0 ml-auto relative -mr-1">
                 <span className={cn(menuOpen || contextMenuOpen ? "invisible" : "group-hover:invisible")}>
                   {titleTrailing}
                 </span>
                 {menuContent && !hideMoreButton && (
-                  <div className={cn(
-                    "absolute inset-0 flex items-center justify-end overflow-visible",
-                    menuOpen || contextMenuOpen ? "opacity-100" : "opacity-0 group-hover:opacity-100"
-                  )}>
-                    <DropdownMenu modal={true} onOpenChange={setMenuOpen}>
+                  <div
+                    className={cn(
+                      "absolute inset-0 flex items-center justify-end overflow-visible",
+                      menuOpen || contextMenuOpen ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                    )}
+                    onMouseDown={(e) => e.stopPropagation()}
+                  >
+                    <DropdownMenu modal={true} open={menuOpen} onOpenChange={setMenuOpen}>
                       <DropdownMenuTrigger asChild>
                         <div className="p-1 rounded-[6px] hover:bg-foreground/10 data-[state=open]:bg-foreground/10 cursor-pointer">
                           <MoreHorizontal className="h-3.5 w-3.5 text-muted-foreground" />
@@ -181,10 +194,25 @@ export function EntityRow({
               <div className={cn("font-medium font-sans line-clamp-2 min-w-0 -mb-[2px]", titleClassName)}>
                 {title}
               </div>
+              {titleSuffix && <div className="shrink-0 self-center flex items-center">{titleSuffix}</div>}
             </div>
           )}
 
-          {/* Badges / subtitle row */}
+          {/* Subtitle line */}
+          {subtitle && (
+            <div className="flex items-start gap-[10px] w-full text-[12px] text-foreground/55 min-w-0 -mt-1">
+              {icon && (
+                <div className="shrink-0 flex items-center gap-[10px] [&>*]:w-3 [&>*]:h-3 invisible" aria-hidden="true">
+                  {icon}
+                </div>
+              )}
+              <div className="min-w-0 flex-1 line-clamp-2 leading-[1.35]">
+                {subtitle}
+              </div>
+            </div>
+          )}
+
+          {/* Badges / metadata row */}
           {(badges || trailing) && (
             <div className="flex items-center gap-[10px] text-xs text-foreground/70 w-full -mb-[2px] min-w-0">
               {/* Invisible spacer matching icon container width */}
@@ -227,9 +255,10 @@ export function EntityRow({
             "absolute right-2 top-2 transition-opacity z-10",
             menuOpen || contextMenuOpen ? "opacity-100" : "opacity-0 group-hover:opacity-100"
           )}
+          onMouseDown={(e) => e.stopPropagation()}
         >
           <div className="flex items-center rounded-[8px] overflow-hidden border border-transparent hover:border-border/50">
-            <DropdownMenu modal={true} onOpenChange={setMenuOpen}>
+            <DropdownMenu modal={true} open={menuOpen} onOpenChange={setMenuOpen}>
               <DropdownMenuTrigger asChild>
                 <div className="p-1.5 hover:bg-foreground/10 data-[state=open]:bg-foreground/10 cursor-pointer">
                   <MoreHorizontal className="h-4 w-4 text-muted-foreground" />

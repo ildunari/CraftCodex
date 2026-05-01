@@ -11,6 +11,7 @@ export type {
   ApiAuthType,
   KnownProvider,
   ApiOAuthProvider,
+  ApiOAuthConfig,
   McpSourceConfig,
   ApiSourceConfig,
   LocalSourceConfig,
@@ -19,12 +20,16 @@ export type {
   SourceGuide,
   LoadedSource,
   CreateSourceInput,
+  ApiRenewEndpoint,
 } from './types.ts';
 
 // Constants and helpers
 export {
   API_OAUTH_PROVIDERS,
   isApiOAuthProvider,
+  isGenericOAuthSource,
+  hasRenewEndpoint,
+  isRefreshableSource,
 } from './types.ts';
 
 // Storage functions

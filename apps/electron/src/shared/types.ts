@@ -63,6 +63,10 @@ export type { LoadedSource, FolderSourceConfig, SourceConnectionStatus };
 import type { LoadedSkill, SkillMetadata } from '@craft-agent/shared/skills/types';
 export type { LoadedSkill, SkillMetadata };
 
+// Resource bundle types (cross-workspace export/import)
+import type { ExportResourcesOptions, ExportResult, ResourceImportMode, ResourceBundle, ResourceImportResult } from '@craft-agent/shared/resources';
+export type { ExportResourcesOptions, ExportResult, ResourceImportMode, ResourceBundle, ResourceImportResult };
+
 // LLM connection types
 import type { LlmConnection, LlmConnectionWithStatus, LlmAuthType, LlmProviderType, NetworkProxySettings } from '@craft-agent/shared/config';
 export type { LlmConnection, LlmConnectionWithStatus, LlmAuthType, LlmProviderType, NetworkProxySettings };
@@ -242,6 +246,10 @@ export interface ElectronAPI {
   removeWorkspace(workspaceId: string): Promise<boolean>
   invokeOnServer(url: string, token: string, channel: string, ...args: any[]): Promise<any>
 
+  // Remote session transfer (main-process orchestrated, supports chunked upload)
+  transferSessionToWorkspace(sessionId: string, targetWorkspaceId: string, sessionIndex?: number, sessionCount?: number): Promise<{ sessionId: string }>
+  onTransferProgress(callback: (progress: { sessionIndex: number; sessionCount: number; chunkSent: number; chunkTotal: number }) => void): () => void
+
   // Session export/import (cross-workspace transfer)
   exportSession(sessionId: string): Promise<unknown>
   importSession(targetWorkspaceId: string, bundle: unknown, mode: 'move' | 'fork'): Promise<{ sessionId: string; warnings?: string[] }>
@@ -249,7 +257,7 @@ export interface ElectronAPI {
   importRemoteSessionTransfer(targetWorkspaceId: string, payload: RemoteSessionTransferPayload): Promise<ImportRemoteSessionTransferResult>
 
   // Pending plan execution (for reload recovery)
-  getPendingPlanExecution(sessionId: string): Promise<{ planPath: string; draftInputSnapshot?: string; awaitingCompaction: boolean } | null>
+  getPendingPlanExecution(sessionId: string): Promise<{ planPath: string; draftInputSnapshot?: string; awaitingCompaction: boolean; executionDispatched: boolean } | null>
   // Permission mode reconciliation
   getSessionPermissionModeState(sessionId: string): Promise<PermissionModeState | null>
 
@@ -302,8 +310,13 @@ export interface ElectronAPI {
   readFilePreviewDataUrl(path: string, maxSize?: number): Promise<string>
   openFileDialog(): Promise<string[]>
   readFileAttachment(path: string): Promise<FileAttachment | null>
+  /** Re-read a user-attached file by absolute path (bypasses workspace-dir validation).
+   *  Used only by draft hydration for paths the user explicitly picked via OS dialog / drag. */
+  readUserAttachment(path: string): Promise<FileAttachment | null>
   storeAttachment(sessionId: string, attachment: FileAttachment): Promise<import('../../../../packages/core/src/types/index.ts').StoredAttachment>
   generateThumbnail(base64: string, mimeType: string): Promise<string | null>
+  /** Returns the absolute filesystem path for a File (only works for file-picker / OS-drag Files). */
+  getFilePath(file: File): string | null
 
   // Filesystem search (for @ mention file selection)
   searchFiles(basePath: string, query: string): Promise<FileSearchResult[]>
@@ -423,11 +436,11 @@ export interface ElectronAPI {
   readPreferences(): Promise<{ content: string; exists: boolean; path: string }>
   writePreferences(content: string): Promise<{ success: boolean; error?: string }>
 
-  // Session Drafts (persisted input text)
-  getDraft(sessionId: string): Promise<string | null>
-  setDraft(sessionId: string, text: string): Promise<void>
+  // Session Drafts (persisted composer state — text + attachment refs)
+  getDraft(sessionId: string): Promise<import('@craft-agent/shared/config').SessionDraft | null>
+  setDraft(sessionId: string, draft: import('@craft-agent/shared/config').SessionDraft): Promise<void>
   deleteDraft(sessionId: string): Promise<void>
-  getAllDrafts(): Promise<Record<string, string>>
+  getAllDrafts(): Promise<Record<string, import('@craft-agent/shared/config').SessionDraft>>
 
   // Session Info Panel
   getSessionFiles(sessionId: string): Promise<SessionFile[]>
@@ -529,6 +542,10 @@ export interface ElectronAPI {
   getKeepAwakeWhileRunning(): Promise<boolean>
   setKeepAwakeWhileRunning(enabled: boolean): Promise<void>
 
+  // Tools settings
+  getBrowserToolEnabled(): Promise<boolean>
+  setBrowserToolEnabled(enabled: boolean): Promise<void>
+
   // Appearance settings
   getRichToolDescriptions(): Promise<boolean>
   setRichToolDescriptions(enabled: boolean): Promise<void>
@@ -617,6 +634,9 @@ export interface ElectronAPI {
   setDefaultThinkingLevel(level: ThinkingLevel): Promise<{ success: boolean; error?: string }>
   setWorkspaceDefaultLlmConnection(workspaceId: string, slug: string | null): Promise<{ success: boolean; error?: string }>
 
+  // Automations
+  getAutomations(workspaceId: string): Promise<unknown>
+
   // Automation testing (manual trigger)
   testAutomation(payload: TestAutomationPayload): Promise<TestAutomationResult>
 
@@ -630,7 +650,63 @@ export interface ElectronAPI {
 
   // Automations change listener
   onAutomationsChanged(callback: (workspaceId: string) => void): () => void
+
+  // Language
+  changeLanguage(lang: string): Promise<void>
+
+  // Resources (cross-workspace export/import)
+  exportResources(workspaceId: string, options: ExportResourcesOptions): Promise<ExportResult>
+  importResources(workspaceId: string, bundle: ResourceBundle, mode: ResourceImportMode): Promise<ResourceImportResult>
+
+  // Messaging gateway — workspaceId is taken from the client handshake (ctx.workspaceId)
+  getMessagingConfig(): Promise<{
+    enabled: boolean
+    platforms: Record<string, { enabled: boolean } | undefined>
+    runtime: Record<string, MessagingPlatformRuntimeInfo | undefined>
+  } | null>
+  updateMessagingConfig(config: Record<string, unknown>): Promise<void>
+  testTelegramToken(token: string): Promise<{ success: boolean; botName?: string; botUsername?: string; error?: string }>
+  saveTelegramToken(token: string): Promise<void>
+  testLarkCredentials(creds: { appId: string; appSecret: string; domain: 'lark' | 'feishu' }): Promise<{ success: boolean; botName?: string; error?: string }>
+  saveLarkCredentials(creds: { appId: string; appSecret: string; domain: 'lark' | 'feishu' }): Promise<void>
+  disconnectMessagingPlatform(platform: string): Promise<void>
+  forgetMessagingPlatform(platform: string): Promise<void>
+  getMessagingBindings(): Promise<Array<{ id: string; workspaceId: string; sessionId: string; platform: string; channelId: string; threadId?: number; channelName?: string; enabled: boolean; createdAt: number }>>
+  generateMessagingPairingCode(sessionId: string, platform: string): Promise<{ code: string; expiresAt: number; botUsername?: string }>
+  /** Telegram supergroup pairing — returns a code typed in the supergroup to capture its chatId. */
+  generateMessagingSupergroupCode(platform: string): Promise<{ code: string; expiresAt: number; botUsername?: string }>
+  /** Read the workspace's currently paired Telegram supergroup, if any. */
+  getMessagingSupergroup(): Promise<{ chatId: string; title: string; capturedAt: number } | null>
+  /** Forget the paired Telegram supergroup (existing topic bindings stay on disk but stop matching). */
+  unbindMessagingSupergroup(): Promise<{ success: boolean }>
+  unbindMessagingSession(sessionId: string, platform?: string): Promise<void>
+  unbindMessagingBinding(bindingId: string): Promise<{ success: boolean }>
+  onMessagingBindingChanged(callback: (workspaceId: string) => void): () => void
+  onMessagingPlatformStatus(callback: (workspaceId: string, platform: string, status: MessagingPlatformRuntimeInfo) => void): () => void
+  // WhatsApp (subprocess-based Baileys adapter)
+  startWhatsAppConnect(): Promise<{ success: boolean }>
+  submitWhatsAppPhone(phoneNumber: string): Promise<{ success: boolean }>
+  onWhatsAppEvent(callback: (payload: { workspaceId: string; event: WhatsAppUiEvent }) => void): () => void
 }
+
+export interface MessagingPlatformRuntimeInfo {
+  platform: string
+  configured: boolean
+  connected: boolean
+  state: 'disconnected' | 'connecting' | 'connected' | 'reconnect_required' | 'error'
+  identity?: string
+  lastError?: string
+  updatedAt: number
+}
+
+/** Event payloads broadcast from the WhatsApp subprocess to the UI. */
+export type WhatsAppUiEvent =
+  | { type: 'qr'; qr: string }
+  | { type: 'pairing_code'; code: string }
+  | { type: 'connected'; jid?: string; name?: string }
+  | { type: 'disconnected'; loggedOut: boolean; reason?: string }
+  | { type: 'unavailable'; reason: string; message: string }
+  | { type: 'error'; message: string }
 
 // =============================================================================
 // Navigation types (renderer-only)

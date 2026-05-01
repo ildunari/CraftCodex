@@ -9,6 +9,7 @@
  */
 
 import { useState, useCallback, useMemo, useEffect } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Document, Page, pdfjs } from 'react-pdf'
 import { FileText } from 'lucide-react'
 import { PreviewOverlay } from './PreviewOverlay'
@@ -49,6 +50,8 @@ export function PDFPreviewOverlay({
   loadPdfData,
   theme = 'light',
 }: PDFPreviewOverlayProps) {
+  const { t } = useTranslation()
+
   // Normalize: items array or single filePath
   const resolvedItems = useMemo<PreviewItem[]>(() => {
     if (items && items.length > 0) return items
@@ -115,7 +118,7 @@ export function PDFPreviewOverlay({
   const headerActions = (
     <div className="flex items-center gap-2">
       <ItemNavigator items={resolvedItems} activeIndex={activeIdx} onSelect={setActiveIdx} size="md" />
-      <CopyButton content={activeItem?.src || filePath} title="Copy path" className="bg-background shadow-minimal" />
+      <CopyButton content={activeItem?.src || filePath} title={t('common.copyPath')} className="bg-background shadow-minimal" />
     </div>
   )
 
@@ -135,14 +138,14 @@ export function PDFPreviewOverlay({
     >
       <div className="h-full flex flex-col items-center overflow-auto">
         {isLoading && (
-          <div className="text-muted-foreground text-sm">Loading PDF...</div>
+          <div className="text-muted-foreground text-sm">{t('preview.loadingPdf')}</div>
         )}
         {fileObj && (
           <Document
             file={fileObj}
             onLoadSuccess={onDocumentLoadSuccess}
             onLoadError={onDocumentLoadError}
-            loading={<div className="text-muted-foreground text-sm">Rendering...</div>}
+            loading={<div className="text-muted-foreground text-sm">{t('common.rendering')}</div>}
           >
             {Array.from({ length: numPages }, (_, i) => (
               <Page

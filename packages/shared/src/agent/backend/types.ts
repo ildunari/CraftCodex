@@ -177,6 +177,9 @@ export interface CoreBackendConfig {
   /** Headless mode flag (disables interactive tools) */
   isHeadless?: boolean;
 
+  /** Skip agent-level config file watching (server already owns a workspace-level watcher) */
+  skipConfigWatcher?: boolean;
+
   /** Debug mode configuration */
   debugMode?: {
     enabled: boolean;
@@ -247,7 +250,7 @@ export interface CoreBackendConfig {
    */
   onImageResize?: (filePath: string, maxSizeBytes: number) => Promise<string | null>;
 
-  /** Enable 1M context window for Opus 4.6. Default: true. Set false to use 200K and conserve usage limits. */
+  /** Enable 1M context window for Opus 4.7. Default: true. Set false to use 200K and conserve usage limits. */
   enable1MContext?: boolean;
 
   /**
@@ -492,6 +495,22 @@ export interface AgentBackend {
    * Get currently active source slugs.
    */
   getActiveSourceSlugs(): string[];
+
+  /**
+   * Get the raw user message for the current turn (cleared between turns).
+   * Used by SessionManager.activateSourceInSessionFn to capture the message
+   * that should be re-sent after a source_test-triggered auto-restart.
+   */
+  getCurrentTurnUserMessage(): string | null;
+
+  /**
+   * Schedule a source-activation auto-restart. Consumed by the backend's
+   * event loop after the next tool_result, which yields `source_activated`
+   * and `forceAbort`s the turn — triggering the renderer's existing
+   * auto_retry effect. Set by SessionManager after a successful mid-turn
+   * activation (source_test auto-enable).
+   */
+  setPendingSourceActivationRestart(pending: { sourceSlug: string; userMessage: string }): void;
 
   /**
    * Get all sources (for context injection).

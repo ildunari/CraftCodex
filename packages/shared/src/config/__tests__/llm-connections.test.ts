@@ -394,7 +394,7 @@ describe('Bedrock-native model display', () => {
   })
 
   it('getModelContextWindow resolves Bedrock IDs', () => {
-    expect(getModelContextWindow('us.anthropic.claude-opus-4-6-v1')).toBe(1_000_000)
+    expect(getModelContextWindow('us.anthropic.claude-opus-4-6-v1')).toBe(200_000)
     expect(getModelContextWindow('us.anthropic.claude-sonnet-4-6')).toBe(200_000)
   })
 

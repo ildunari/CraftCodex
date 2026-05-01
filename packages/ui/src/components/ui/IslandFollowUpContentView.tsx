@@ -1,5 +1,6 @@
 import * as React from 'react'
 import { ChevronDown, Send } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { IslandContentView, type IslandMorphTarget } from './Island'
 import {
   DropdownMenu,
@@ -48,12 +49,12 @@ export function IslandFollowUpContentView({
   onSubmit,
   onSubmitAndSend,
   onDelete,
-  title = 'Follow up',
-  placeholder = 'Add comments the agent should consider in the next turn…',
-  submitLabel = 'Continue',
-  submitAndSendLabel = 'Save & Send',
-  editLabel = 'Edit',
-  deleteLabel = 'Delete',
+  title: titleProp,
+  placeholder: placeholderProp,
+  submitLabel: submitLabelProp,
+  submitAndSendLabel: submitAndSendLabelProp,
+  editLabel: editLabelProp,
+  deleteLabel: deleteLabelProp,
   maxInputHeight = 400,
   sendMessageKey = 'enter',
   morphFrom = null,
@@ -62,6 +63,13 @@ export function IslandFollowUpContentView({
   mode = 'edit',
   onRequestEdit,
 }: IslandFollowUpContentViewProps) {
+  const { t } = useTranslation()
+  const title = titleProp ?? t('chat.followUp')
+  const placeholder = placeholderProp ?? t('chat.annotationPlaceholder')
+  const submitLabel = submitLabelProp ?? t('common.continue')
+  const submitAndSendLabel = submitAndSendLabelProp ?? t('chat.followUpSaveAndSend')
+  const editLabel = editLabelProp ?? t('common.edit')
+  const deleteLabel = deleteLabelProp ?? t('common.delete')
   const textareaRef = React.useRef<HTMLTextAreaElement | null>(null)
   const measureTextareaRef = React.useRef<HTMLTextAreaElement | null>(null)
   const isViewMode = mode === 'view'
@@ -211,7 +219,7 @@ export function IslandFollowUpContentView({
               onClick={onCancel}
               className="h-8 px-3 rounded-[8px] text-sm text-foreground/75 hover:bg-foreground/5"
             >
-              Cancel
+              {t('common.cancel')}
             </button>
 
             {canSubmitAndSend ? (
@@ -230,8 +238,8 @@ export function IslandFollowUpContentView({
                     <button
                       type="button"
                       disabled={isEmpty}
-                      aria-label="More submit actions"
-                      title="More submit actions"
+                      aria-label={t('chat.moreSubmitActions')}
+                      title={t('chat.moreSubmitActions')}
                       className="h-8 w-6 border-l border-border/40 inline-flex items-center justify-center text-foreground/70 hover:text-foreground hover:bg-foreground/2 data-[state=open]:bg-foreground/2 data-[state=open]:text-foreground disabled:opacity-40 disabled:cursor-default disabled:hover:bg-transparent disabled:hover:text-foreground/70"
                     >
                       <ChevronDown className="h-3 w-3" />

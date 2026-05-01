@@ -17,7 +17,7 @@
  */
 
 import '@sentry/electron/preload'
-import { contextBridge, ipcRenderer, shell } from 'electron'
+import { contextBridge, ipcRenderer, shell, webUtils } from 'electron'
 import { WsRpcClient, type TransportConnectionState } from '../transport/client'
 import { RoutedClient } from '../transport/routed-client'
 import { buildClientApi } from '../transport/build-api'
@@ -271,12 +271,12 @@ client.onConnectionStateChanged((state) => {
   try {
     // 1. Start local callback server to receive OAuth redirect
     callbackServer = await createCallbackServer({ appType: 'electron' })
-    const port = parseInt(new URL(callbackServer.url).port, 10)
+    const callbackUrl = `${callbackServer.url}/callback`
 
     // 2. Ask server to prepare the flow (PKCE, auth URL, store in flow store)
     const startResult = await client.invoke('oauth:start', {
       sourceSlug: args.sourceSlug,
-      callbackPort: port,
+      callbackUrl,
       sessionId: args.sessionId,
       authRequestId: args.authRequestId,
     })
@@ -406,6 +406,13 @@ client.onConnectionStateChanged((state) => {
 ;(api as ElectronAPI).removeWorkspace = (workspaceId: string) => ipcRenderer.invoke('workspace:remove', workspaceId)
 ;(api as ElectronAPI).invokeOnServer = (url: string, token: string, channel: string, ...args: any[]) =>
   ipcRenderer.invoke('server:invokeOnServer', url, token, channel, ...args)
+;(api as ElectronAPI).transferSessionToWorkspace = (sessionId: string, targetWorkspaceId: string, sessionIndex?: number, sessionCount?: number) =>
+  ipcRenderer.invoke('session:transferToRemoteWorkspace', sessionId, targetWorkspaceId, sessionIndex, sessionCount)
+;(api as ElectronAPI).onTransferProgress = (cb: (progress: { sessionIndex: number; sessionCount: number; chunkSent: number; chunkTotal: number }) => void) => {
+  const handler = (_e: any, progress: { sessionIndex: number; sessionCount: number; chunkSent: number; chunkTotal: number }) => cb(progress)
+  ipcRenderer.on('transfer:progress', handler)
+  return () => { ipcRenderer.removeListener('transfer:progress', handler) }
+}
 
 // System warnings — expose env-based flags set during main process startup
 // (preload-only: reads env var directly, no IPC round-trip needed)
@@ -413,5 +420,19 @@ client.onConnectionStateChanged((state) => {
   vcredistMissing: process.env.CRAFT_VCREDIST_MISSING === '1',
   downloadUrl: process.env.CRAFT_VCREDIST_URL,
 })
+
+// i18n: sync language changes to main process (for native menus/dialogs)
+;(api as ElectronAPI).changeLanguage = (lang: string) => ipcRenderer.invoke('i18n:changeLanguage', lang)
+
+// webUtils.getPathForFile: returns the absolute OS path of a File object obtained
+// from <input type="file"> or OS drag-drop. Returns null for Files fabricated from
+// Blobs (clipboard paste, web-drag) — those are content-only, no filesystem path.
+;(api as ElectronAPI).getFilePath = (file: File) => {
+  try {
+    return webUtils.getPathForFile(file) || null
+  } catch {
+    return null
+  }
+}
 
 contextBridge.exposeInMainWorld('electronAPI', api)

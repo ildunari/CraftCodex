@@ -24,9 +24,10 @@ const codexFetcher = new CodexModelFetcher()
  * from FetchableProvider, this object will fail to compile until you add it here.
  */
 export const MODEL_FETCHERS: ModelFetcherMap = {
-  anthropic: anthropicFetcher,
-  pi:        piFetcher,
-  bedrock:   bedrockVertexFetcher,
-  vertex:    bedrockVertexFetcher,
-  codex:     codexFetcher,
+  anthropic:        anthropicFetcher,
+  anthropic_compat: anthropicFetcher,
+  pi:               piFetcher,
+  bedrock:          bedrockVertexFetcher,
+  vertex:           bedrockVertexFetcher,
+  codex:            codexFetcher,
 }

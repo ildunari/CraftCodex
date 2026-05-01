@@ -49,6 +49,10 @@ export interface AppShellContextType {
   pendingCredentials: Map<string, CredentialRequest[]>
   /** Get draft input text for a session - reads from ref without triggering re-renders */
   getDraft: (sessionId: string) => string
+  /** Get persisted attachment refs (path + name) for a session's draft - no file IO */
+  getDraftAttachmentRefs: (sessionId: string) => import('@craft-agent/shared/config').DraftAttachmentRef[]
+  /** Hydrate persisted attachment refs into full FileAttachment objects (async, reads files) */
+  hydrateDraftAttachments: (sessionId: string) => Promise<FileAttachment[]>
   /** All enabled sources for this workspace - provided by AppShell component */
   enabledSources?: LoadedSource[]
   /** All skills for this workspace - provided by AppShell component (for @mentions) */
@@ -119,6 +123,9 @@ export interface AppShellContextType {
   // Input draft callback
   onInputChange: (sessionId: string, value: string) => void
 
+  // Attachment draft callback — persists attachment refs per session
+  onAttachmentsChange: (sessionId: string, attachments: FileAttachment[]) => void
+
   // Source selection callback (per-session) - provided by AppShell component
   onSessionSourcesChange?: (sessionId: string, sourceSlugs: string[]) => void
 
@@ -134,6 +141,9 @@ export interface AppShellContextType {
   /** Whether this panel is the focused panel (for multi-panel visual differentiation) */
   isFocusedPanel?: boolean
 
+  /** Whether the shell is currently in compact/narrow mode */
+  isCompactMode?: boolean
+
   // Session list search state (for ChatDisplay highlighting)
   /** Current search query from session list - used to highlight matches in ChatDisplay */
   sessionListSearchQuery?: string
@@ -144,7 +154,7 @@ export interface AppShellContextType {
   /** Ref to ChatDisplay for navigation between matches */
   chatDisplayRef?: React.RefObject<ChatDisplayHandle>
   /** Callback when ChatDisplay match info changes (for immediate UI updates) */
-  onChatMatchInfoChange?: (info: { count: number; index: number }) => void
+  onChatMatchInfoChange?: (info: { sessionId: string | null; count: number; index: number; isHighlighting: boolean }) => void
 
   // Automation management
   /** Test an automation by ID — executes its actions and returns results */

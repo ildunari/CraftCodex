@@ -196,10 +196,43 @@ export function isOAuthSource(source: LoadedSource): boolean {
 
   // API OAuth sources (Google, Slack, Microsoft)
   if (source.config.type === 'api') {
-    return isApiOAuthProvider(source.config.provider);
+    if (isApiOAuthProvider(source.config.provider)) return true;
+    // Generic OAuth API sources (e.g. GitHub, Linear)
+    if (isGenericOAuthSource(source)) return true;
   }
 
   return false;
+}
+
+/**
+ * Check if a source uses generic OAuth (not Google/Slack/Microsoft provider-specific).
+ * Matches API sources with authType 'oauth' — either explicit oauth config block
+ * or auto-discovery from baseUrl via RFC 9728/8414.
+ */
+export function isGenericOAuthSource(source: LoadedSource): boolean {
+  return (
+    source.config.type === 'api' &&
+    source.config.api?.authType === 'oauth' &&
+    !isApiOAuthProvider(source.config.provider)
+  );
+}
+
+/**
+ * Check if an API source has a token renew endpoint configured.
+ */
+export function hasRenewEndpoint(source: LoadedSource): boolean {
+  return source.config.type === 'api' && !!source.config.api?.renewEndpoint?.path;
+}
+
+/**
+ * Check if a source can auto-refresh its token.
+ * Returns true for OAuth sources OR sources with a renewEndpoint.
+ *
+ * Use this as the single guard for "can this source refresh?" instead of
+ * sprinkling provider/authType/renewEndpoint checks in multiple places.
+ */
+export function isRefreshableSource(source: LoadedSource): boolean {
+  return isOAuthSource(source) || hasRenewEndpoint(source);
 }
 
 /**
@@ -280,6 +313,58 @@ export interface ApiTestEndpoint {
 }
 
 /**
+ * Generic OAuth configuration for API sources.
+ * Allows any OAuth 2.0 provider to be configured via config.json
+ * without needing an MCP server or manual PAT.
+ */
+export interface ApiOAuthConfig {
+  /** OAuth authorization endpoint URL (REQUIRED) */
+  authorizationUrl: string;
+  /** OAuth token exchange endpoint URL (REQUIRED) */
+  tokenUrl: string;
+  /** OAuth client ID (REQUIRED) */
+  clientId: string;
+  /** OAuth client secret (optional for public PKCE clients) */
+  clientSecret?: string;
+  /** Requested OAuth scopes */
+  scopes?: string[];
+  /** Auth0-style audience parameter */
+  audience?: string;
+  /** Additional parameters to include in the authorization URL */
+  extraParams?: Record<string, string>;
+}
+
+/**
+ * Token renewal endpoint configuration for non-OAuth API sources.
+ * Allows custom bearer-token APIs to auto-renew expired tokens by calling
+ * a provider-specific endpoint (not OAuth-compliant).
+ *
+ * MVP scope: access-token-based renewal only. The current access token is
+ * sent via the Authorization header and/or substituted into body/headers
+ * using the {{token}} placeholder.
+ */
+export interface ApiRenewEndpoint {
+  /** Renew URL — relative path (resolved against baseUrl) or absolute URL */
+  path: string;
+  /** HTTP method (default: POST) */
+  method?: 'GET' | 'POST';
+  /** Request body — {{token}} in string leaves is substituted with current access token.
+   *  Supports nested objects (recursive substitution on string leaves). */
+  body?: Record<string, unknown>;
+  /** Extra headers for the renew request — {{token}} substitution applies here too.
+   *  Merged on top of defaultHeaders. Authorization header is always sent unless
+   *  explicitly overridden here. */
+  headers?: Record<string, string>;
+  /** JSON field name for the new access token in response (default: "access_token") */
+  tokenField?: string;
+  /** JSON field name for expiry in seconds in response (default: "expires_in") */
+  expiresInField?: string;
+  /** Fallback TTL in seconds when renew response doesn't include expiry (optional).
+   *  Without this, missing expiry causes refresh on every session start (safe but noisy). */
+  fallbackTtlSecs?: number;
+}
+
+/**
  * API-specific configuration
  */
 export interface ApiSourceConfig {
@@ -291,6 +376,7 @@ export interface ApiSourceConfig {
   authScheme?: string; // For 'bearer' auth (default: "Bearer", could be "Token")
   defaultHeaders?: Record<string, string>; // Headers to include with every request
   testEndpoint?: ApiTestEndpoint; // Endpoint to use for connection testing
+  renewEndpoint?: ApiRenewEndpoint; // Optional token renewal endpoint for non-OAuth sources
 
   // Google OAuth fields (used when provider is 'google')
   googleService?: GoogleService; // Predefined service for scope selection
@@ -307,6 +393,9 @@ export interface ApiSourceConfig {
   // Microsoft OAuth fields (used when provider is 'microsoft')
   microsoftService?: MicrosoftService; // Predefined service for scope selection
   microsoftScopes?: string[]; // Custom scopes (overrides microsoftService)
+
+  // Generic OAuth config (used when authType is 'oauth' and provider is not google/slack/microsoft)
+  oauth?: ApiOAuthConfig;
 }
 
 /**

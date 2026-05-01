@@ -35,6 +35,7 @@ import { CodeBlock } from './CodeBlock'
 import { HTMLPreviewOverlay } from '../overlay/HTMLPreviewOverlay'
 import { ItemNavigator } from '../overlay/ItemNavigator'
 import { usePlatform } from '../../context/PlatformContext'
+import { useTranslation } from 'react-i18next'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -93,6 +94,7 @@ export interface MarkdownHtmlBlockProps {
 }
 
 export function MarkdownHtmlBlock({ code, className }: MarkdownHtmlBlockProps) {
+  const { t } = useTranslation()
   const { onReadFile } = usePlatform()
 
   // Parse the JSON spec — supports single src or items array
@@ -184,7 +186,7 @@ export function MarkdownHtmlBlock({ code, className }: MarkdownHtmlBlockProps) {
         <div className="px-3 py-2 bg-muted/50 border-b flex items-center gap-2">
           <Globe className="w-3.5 h-3.5 text-muted-foreground/50" />
           <span className="text-[12px] text-muted-foreground font-medium flex-1">
-            {spec.title || 'HTML Preview'}
+            {spec.title || t('preview.htmlPreview')}
           </span>
           <div className="flex items-center gap-1">
             <ItemNavigator items={items} activeIndex={activeIndex} onSelect={setActiveIndex} />
@@ -197,7 +199,7 @@ export function MarkdownHtmlBlock({ code, className }: MarkdownHtmlBlockProps) {
                 "focus:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:opacity-100",
                 hasMultiple ? "opacity-100" : "opacity-0 group-hover:opacity-100"
               )}
-              title="View Fullscreen"
+              title={t('common.viewFullscreen')}
             >
               <Maximize2 className="w-3.5 h-3.5" />
             </button>
@@ -215,7 +217,7 @@ export function MarkdownHtmlBlock({ code, className }: MarkdownHtmlBlockProps) {
                 key={item.src}
                 sandbox="allow-same-origin allow-top-navigation-by-user-activation"
                 srcDoc={processed}
-                title={item.label || spec.title || 'HTML Preview'}
+                title={item.label || spec.title || t('preview.htmlPreview')}
                 className="w-full border-0 bg-white"
                 style={{
                   height: '400px',
@@ -227,7 +229,7 @@ export function MarkdownHtmlBlock({ code, className }: MarkdownHtmlBlockProps) {
 
           {/* Loading state for uncached active item */}
           {!activeHtml && loading && (
-            <div className="py-8 text-center text-muted-foreground text-[13px]">Loading...</div>
+            <div className="py-8 text-center text-muted-foreground text-[13px]">{t('common.loading')}</div>
           )}
 
           {/* Error state for uncached active item */}

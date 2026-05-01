@@ -11,13 +11,15 @@
  * - Pending/queued states (Electron only)
  */
 
-import type { ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { Clock } from 'lucide-react'
 import type { StoredAttachment, ContentBadge } from '@craft-agent/core'
 import { normalizePath } from '@craft-agent/core/utils'
 import { cn } from '../../lib/utils'
 import { Markdown } from '../markdown'
 import { FileTypeIcon, getFileTypeLabel } from './attachment-helpers'
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '../tooltip'
+import { useTranslation } from 'react-i18next'
 
 // Fallback text icons for badges without iconDataUrl
 // Using simple characters since SVG rendering may not work in all contexts
@@ -96,13 +98,14 @@ function CommandBadge({ badge }: { badge: ContentBadge }) {
  * Note: edit_request badges are handled separately by EditRequestBadge
  */
 function ContextBadge({ badge }: { badge: ContentBadge }) {
+  const { t } = useTranslation()
   const displayLabel = badge.collapsedLabel || badge.label
 
   return (
     <span
       className="inline-flex items-center gap-1 h-[22px] px-1.5 mr-1 rounded-[5px] bg-background shadow-minimal text-[12px] align-middle"
       style={{ verticalAlign: 'middle', transform: 'translateY(-1px)' }}
-      title="Context badge"
+      title={t('chat.contextBadge')}
     >
       <span className="h-[12px] w-[12px] rounded-[2px] bg-foreground/5 flex items-center justify-center text-foreground/50 shrink-0 text-[8px]">
         {CONTEXT_ICON_TEXT}
@@ -312,13 +315,19 @@ export interface UserMessageBubbleProps {
   attachments?: StoredAttachment[]
   /** Content badges for inline display (sources, skills) */
   badges?: ContentBadge[]
-  /** Whether the message is pending (shimmer animation) */
+  /** Whether the message is awaiting backend confirmation. User bubbles stay visually stable. */
   isPending?: boolean
   /** Whether the message is queued (badge shown) */
   isQueued?: boolean
   /** Compact mode - reduces padding for popover embedding */
   compactMode?: boolean
 }
+
+/** Minimum visible duration of the "Queued" chip. Both backends ack
+ * mid-stream sends within ~50–150ms, which would otherwise make the chip
+ * flash too briefly to register. Hold it long enough for the user to
+ * actually read it. */
+const QUEUED_MIN_VISIBLE_MS = 2500
 
 export function UserMessageBubble({
   content,
@@ -327,11 +336,59 @@ export function UserMessageBubble({
   onFileClick,
   attachments,
   badges,
-  isPending,
   isQueued,
   compactMode,
 }: UserMessageBubbleProps) {
+  const { t } = useTranslation()
   const hasAttachments = attachments && attachments.length > 0
+
+  // Show the queued chip while `isQueued` is true AND for at least
+  // QUEUED_MIN_VISIBLE_MS after it first became true — even if the backend
+  // acks in <150ms. Pure UI state; `isQueued` remains the persisted source
+  // of truth.
+  const [showQueued, setShowQueued] = useState(isQueued ?? false)
+  const queuedShownAtRef = useRef<number | null>(isQueued ? Date.now() : null)
+  const clearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (clearTimerRef.current) clearTimeout(clearTimerRef.current)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (clearTimerRef.current) {
+      clearTimeout(clearTimerRef.current)
+      clearTimerRef.current = null
+    }
+
+    if (isQueued) {
+      setShowQueued(true)
+      if (queuedShownAtRef.current === null) {
+        queuedShownAtRef.current = Date.now()
+      }
+      return
+    }
+
+    // isQueued flipped to false. Keep the chip up for the remainder of
+    // the minimum visible window, then clear.
+    if (queuedShownAtRef.current === null) return
+
+    const elapsed = Date.now() - queuedShownAtRef.current
+    const remaining = Math.max(0, QUEUED_MIN_VISIBLE_MS - elapsed)
+
+    if (remaining === 0) {
+      setShowQueued(false)
+      queuedShownAtRef.current = null
+      return
+    }
+
+    clearTimerRef.current = setTimeout(() => {
+      setShowQueued(false)
+      queuedShownAtRef.current = null
+      clearTimerRef.current = null
+    }, remaining)
+  }, [isQueued])
 
   // Separate edit_request badges (rendered above bubble) from other badges (rendered inline)
   const editRequestBadges = badges?.filter(isEditRequestBadge) ?? []
@@ -366,7 +423,7 @@ export function UserMessageBubble({
                 key={att.id || i}
                 className="shrink-0 cursor-pointer hover:opacity-80 transition-opacity"
                 onClick={() => att.storedPath && onFileClick?.(att.storedPath)}
-                title={`Click to open ${att.name}`}
+                title={t('chat.clickToOpen', { name: att.name })}
               >
                 {isImage ? (
                   /* IMAGE: Square thumbnail only */
@@ -422,14 +479,27 @@ export function UserMessageBubble({
         </div>
       )}
 
-      {/* Text content bubble */}
+      {/* Text content bubble. Queued messages render an inline header chip
+          inside the bubble (Clock icon + 'Queued' italic) instead of a
+          separate pill below — keeps the chat to one bubble per message
+          while the chip and pulsing icon make the waiting state obvious
+          (#616 follow-up). */}
       <div
         className={cn(
           "max-w-[80%] bg-user-message-bubble rounded-[16px] break-words min-w-0 select-text [&_p]:m-0",
-          compactMode ? "px-4 py-2" : "px-5 py-3.5",
-          isPending && "animate-shimmer"
+          compactMode ? "px-4 py-2" : "px-5 py-3.5"
         )}
       >
+        {showQueued && (
+          <div
+            className="flex items-center gap-1.5 text-foreground/55 mb-1.5"
+            role="status"
+            aria-live="polite"
+          >
+            <Clock className="h-3 w-3 animate-pulse" aria-hidden="true" />
+            <span className="text-[11px] italic">{t('chat.queuedBadge')}</span>
+          </div>
+        )}
         {hasInlineBadges
           ? renderContentWithBadges(displayContent, inlineBadges, onUrlClick, onFileClick)
           : (
@@ -444,13 +514,6 @@ export function UserMessageBubble({
           )
         }
       </div>
-
-      {/* Queued badge */}
-      {isQueued && (
-        <span className="text-[10px] text-muted-foreground bg-foreground/5 px-2 py-0.5 rounded-full">
-          queued
-        </span>
-      )}
     </div>
   )
 }

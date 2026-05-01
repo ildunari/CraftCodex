@@ -2,7 +2,9 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { dirname } from 'path'
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
 import { getPreferencesPath, getSessionDraft, setSessionDraft, deleteSessionDraft, getAllSessionDrafts, getWorkspaceByNameOrId, getDefaultThinkingLevel, setDefaultThinkingLevel } from '@craft-agent/shared/config'
-import { isValidThinkingLevel, normalizeThinkingLevel } from '@craft-agent/shared/agent/thinking-levels'
+import { isValidThinkingLevel, normalizeThinkingLevel, THINKING_LEVEL_IDS } from '@craft-agent/shared/agent/thinking-levels'
+
+const VALID_THINKING_LEVELS_LIST = THINKING_LEVEL_IDS.map(id => `'${id}'`).join(', ')
 import { getWorkspaceOrThrow } from '@craft-agent/server-core/handlers'
 import type { RpcServer } from '@craft-agent/server-core/transport'
 import type { HandlerDeps } from '../handler-deps'
@@ -29,10 +31,14 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.appearance.SET_RICH_TOOL_DESCRIPTIONS,
   RPC_CHANNELS.caching.GET_EXTENDED_PROMPT_CACHE,
   RPC_CHANNELS.caching.SET_EXTENDED_PROMPT_CACHE,
+  RPC_CHANNELS.caching.GET_ENABLE_1M_CONTEXT,
+  RPC_CHANNELS.caching.SET_ENABLE_1M_CONTEXT,
   RPC_CHANNELS.sessions.GET_MODEL,
   RPC_CHANNELS.sessions.SET_MODEL,
   RPC_CHANNELS.settings.GET_DEFAULT_THINKING_LEVEL,
   RPC_CHANNELS.settings.SET_DEFAULT_THINKING_LEVEL,
+  RPC_CHANNELS.tools.GET_BROWSER_TOOL_ENABLED,
+  RPC_CHANNELS.tools.SET_BROWSER_TOOL_ENABLED,
   RPC_CHANNELS.settings.GET_NETWORK_PROXY,
   RPC_CHANNELS.dialog.OPEN_FOLDER,
 ] as const
@@ -48,12 +54,13 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
 
   server.handle(RPC_CHANNELS.settings.SET_DEFAULT_THINKING_LEVEL, async (_ctx, level: string) => {
     if (!isValidThinkingLevel(level)) {
-      throw new Error(`Invalid thinking level: ${level}. Valid values: 'off', 'low', 'medium', 'high', 'max'`)
+      throw new Error(`Invalid thinking level: ${level}. Valid values: ${VALID_THINKING_LEVELS_LIST}`)
     }
     const success = setDefaultThinkingLevel(level)
     if (!success) {
       throw new Error('Failed to persist default thinking level')
     }
+    return { success: true }
   })
 
   // ============================================================
@@ -192,14 +199,14 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
   // Session Drafts (persisted input text)
   // ============================================================
 
-  // Get draft text for a session
+  // Get draft for a session (text + attachment refs)
   server.handle(RPC_CHANNELS.drafts.GET, async (_ctx, sessionId: string) => {
     return getSessionDraft(sessionId)
   })
 
-  // Set draft text for a session (pass empty string to clear)
-  server.handle(RPC_CHANNELS.drafts.SET, async (_ctx, sessionId: string, text: string) => {
-    setSessionDraft(sessionId, text)
+  // Set draft for a session (empty drafts are cleared)
+  server.handle(RPC_CHANNELS.drafts.SET, async (_ctx, sessionId: string, draft: import('@craft-agent/shared/config').SessionDraft) => {
+    setSessionDraft(sessionId, draft)
   })
 
   // Delete draft for a session
@@ -304,6 +311,20 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
   server.handle(RPC_CHANNELS.caching.SET_ENABLE_1M_CONTEXT, async (_ctx, enabled: boolean) => {
     const { setEnable1MContext } = await import('@craft-agent/shared/config/storage')
     setEnable1MContext(enabled)
+  })
+
+  // ============================================================
+  // Tools Settings
+  // ============================================================
+
+  server.handle(RPC_CHANNELS.tools.GET_BROWSER_TOOL_ENABLED, async () => {
+    const { getBrowserToolEnabled } = await import('@craft-agent/shared/config/storage')
+    return getBrowserToolEnabled()
+  })
+
+  server.handle(RPC_CHANNELS.tools.SET_BROWSER_TOOL_ENABLED, async (_ctx, enabled: boolean) => {
+    const { setBrowserToolEnabled } = await import('@craft-agent/shared/config/storage')
+    setBrowserToolEnabled(enabled)
   })
 
   // ============================================================

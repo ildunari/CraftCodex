@@ -355,7 +355,11 @@ function copyProductionDeps(config: ServerBuildConfig): void {
   //    This catches everything — declared deps, undeclared deps, transitive
   //    imports that happen to work due to hoisting. No more whack-a-mole.
   // -------------------------------------------------------------------------
-  const SERVER_PACKAGES = ['server', 'server-core', 'shared', 'core', 'session-tools-core', 'session-mcp-server'];
+  // messaging-gateway is included so its runtime deps (grammy, etc.) land in node_modules.
+  // messaging-whatsapp-worker is intentionally OMITTED: Baileys and its transitive deps
+  // are bundled directly into packages/messaging-whatsapp-worker/dist/worker.cjs by
+  // scripts/build-wa-worker.ts — pulling them into node_modules would duplicate the tree.
+  const SERVER_PACKAGES = ['server', 'server-core', 'shared', 'core', 'session-tools-core', 'session-mcp-server', 'messaging-gateway'];
 
   const allImports = new Set<string>();
   for (const pkg of SERVER_PACKAGES) {
@@ -391,10 +395,20 @@ function copyProductionDeps(config: ServerBuildConfig): void {
   // -------------------------------------------------------------------------
   // 2. Platform-specific native binaries (optionalDependencies, not in dep trees)
   // -------------------------------------------------------------------------
+  // NOTE on `@anthropic-ai/claude-agent-sdk-<platform>-<arch>`: since SDK
+  // 0.2.113 the SDK ships only sdk.mjs in the main package; the native
+  // `claude` binary lives in this per-platform optional dep. The server runs
+  // on its host platform/arch so we ship only the matching one.
+  const sdkPlatformPkg = platform === 'win32'
+    ? `@anthropic-ai/claude-agent-sdk-win32-${arch}`
+    : `@anthropic-ai/claude-agent-sdk-${platform}-${arch}`;
+
   const PLATFORM_DEPS = [
     `@img/sharp-${platform === 'darwin' ? 'darwin' : 'linux'}-${arch}`,
     `@img/sharp-libvips-${platform === 'darwin' ? 'darwin' : 'linux'}-${arch}`,
     '@img/colour',
+    sdkPlatformPkg,
+    '@vscode/ripgrep',
   ];
 
   for (const dep of PLATFORM_DEPS) {
@@ -414,36 +428,6 @@ function copyProductionDeps(config: ServerBuildConfig): void {
   }
 
   console.log(`  Total: ${copied.size} packages copied to node_modules`);
-
-  // Filter ripgrep to target platform only
-  filterRipgrep(config);
-}
-
-function filterRipgrep(config: ServerBuildConfig): void {
-  const { outputDir, platform, arch } = config;
-  const ripgrepDir = join(outputDir, 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'vendor', 'ripgrep');
-
-  if (!existsSync(ripgrepDir)) {
-    console.warn('  Warning: ripgrep vendor directory not found in SDK');
-    return;
-  }
-
-  const keepPlatform = `${arch}-${platform}`;
-  let removedSize = 0;
-
-  for (const entry of readdirSync(ripgrepDir)) {
-    const fullPath = join(ripgrepDir, entry);
-    const stat = lstatSync(fullPath);
-    if (stat.isDirectory() && entry !== keepPlatform) {
-      const dirSize = getDirSize(fullPath);
-      removedSize += dirSize;
-      rmSync(fullPath, { recursive: true, force: true });
-    }
-  }
-
-  if (removedSize > 0) {
-    console.log(`  Filtered ripgrep: removed ${(removedSize / 1024 / 1024).toFixed(1)} MB (kept ${keepPlatform})`);
-  }
 }
 
 function getDirSize(dir: string): number {
@@ -466,7 +450,19 @@ function getDirSize(dir: string): number {
 function copyWorkspacePackages(config: ServerBuildConfig): void {
   const { rootDir, outputDir } = config;
 
-  const packages = ['server', 'server-core', 'shared', 'core', 'session-tools-core', 'session-mcp-server'];
+  // messaging-whatsapp-worker is included so dist/worker.cjs (built in step 4) ships.
+  // The worker is spawned as a Node subprocess against that file at runtime; see
+  // CRAFT_MESSAGING_WA_WORKER env resolution in packages/server/src/index.ts.
+  const packages = [
+    'server',
+    'server-core',
+    'shared',
+    'core',
+    'session-tools-core',
+    'session-mcp-server',
+    'messaging-gateway',
+    'messaging-whatsapp-worker',
+  ];
 
   for (const pkg of packages) {
     const src = join(rootDir, 'packages', pkg);
@@ -858,6 +854,12 @@ async function main(): Promise<void> {
     electronDir,
   };
   buildMcpServers(buildConfig);
+
+  // Build the WhatsApp worker bundle. Must happen before copyWorkspacePackages
+  // so dist/worker.cjs exists when we copy the messaging-whatsapp-worker package.
+  // The bundle embeds Baileys + transitive deps; see scripts/build-wa-worker.ts.
+  console.log('  Building WhatsApp worker bundle...');
+  await $`bun run ${join(rootDir, 'scripts', 'build-wa-worker.ts')}`.cwd(rootDir);
 
   // Step 5: Assemble resources
   console.log('\n[5/8] Assembling resources...');

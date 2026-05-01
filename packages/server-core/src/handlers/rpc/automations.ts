@@ -55,6 +55,7 @@ async function withAutomationMatcher(workspaceId: string, eventName: string, mat
 }
 
 export const HANDLED_CHANNELS = [
+  RPC_CHANNELS.automations.GET,
   RPC_CHANNELS.automations.TEST,
   RPC_CHANNELS.automations.SET_ENABLED,
   RPC_CHANNELS.automations.DUPLICATE,
@@ -66,6 +67,33 @@ export const HANDLED_CHANNELS = [
 
 export function registerAutomationsHandlers(server: RpcServer, deps: HandlerDeps): void {
   const log = deps.platform.logger
+
+  // Get automations config for a workspace (read-only, resolves path server-side)
+  server.handle(RPC_CHANNELS.automations.GET, async (_ctx, workspaceId: string) => {
+    log.info(`AUTOMATIONS_GET: Loading automations for workspace: ${workspaceId}`)
+    const workspace = getWorkspaceByNameOrId(workspaceId)
+    if (!workspace) {
+      log.error(`AUTOMATIONS_GET: Workspace not found: ${workspaceId}`)
+      return null
+    }
+    try {
+      const { resolveAutomationsConfigPath } = await import('@craft-agent/shared/automations/resolve-config-path')
+      const configPath = resolveAutomationsConfigPath(workspace.rootPath)
+      log.info(`AUTOMATIONS_GET: Reading config from: ${configPath}`)
+      const content = await readFile(configPath, 'utf-8')
+      const parsed = JSON.parse(content)
+      const eventCount = parsed?.automations ? Object.keys(parsed.automations).length : 0
+      log.info(`AUTOMATIONS_GET: Loaded ${eventCount} event type(s) from ${configPath}`)
+      return parsed
+    } catch (error) {
+      if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT') {
+        log.info(`AUTOMATIONS_GET: No automations.json found for workspace ${workspaceId}`)
+        return null // No automations configured yet
+      }
+      log.error(`AUTOMATIONS_GET: Error loading automations:`, error)
+      throw error
+    }
+  })
 
   server.handle(RPC_CHANNELS.automations.TEST, async (_ctx, payload: import('@craft-agent/shared/protocol').TestAutomationPayload) => {
     const workspace = getWorkspaceByNameOrId(payload.workspaceId)
@@ -114,17 +142,19 @@ export function registerAutomationsHandlers(server: RpcServer, deps: HandlerDeps
       const references = parsePromptReferences(action.prompt)
 
       try {
-        const { sessionId } = await deps.sessionManager.executePromptAutomation(
-          payload.workspaceId,
-          workspace.rootPath,
-          action.prompt,
-          payload.labels,
-          payload.permissionMode,
-          references.mentions,
-          action.llmConnection,
-          action.model,
-          payload.automationName,
-        )
+        const { sessionId } = await deps.sessionManager.executePromptAutomation({
+          workspaceId: payload.workspaceId,
+          workspaceRootPath: workspace.rootPath,
+          prompt: action.prompt,
+          labels: payload.labels,
+          permissionMode: payload.permissionMode,
+          mentions: references.mentions,
+          llmConnection: action.llmConnection,
+          model: action.model,
+          thinkingLevel: action.thinkingLevel,
+          automationName: payload.automationName,
+          telegramTopic: payload.telegramTopic,
+        })
         results.push({
           type: 'prompt',
           success: true,

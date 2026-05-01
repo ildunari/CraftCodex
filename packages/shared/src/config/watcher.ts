@@ -43,7 +43,7 @@ import {
 import { permissionsConfigCache, getAppPermissionsDir } from '../agent/permissions-config.ts';
 import { getWorkspacePath, getWorkspaceSourcesPath, getWorkspaceSkillsPath } from '../workspaces/storage.ts';
 import type { LoadedSkill } from '../skills/types.ts';
-import { loadSkill, loadAllSkills, skillNeedsIconDownload, downloadSkillIcon } from '../skills/storage.ts';
+import { loadSkill, loadAllSkills, invalidateSkillsCache, skillNeedsIconDownload, downloadSkillIcon } from '../skills/storage.ts';
 import {
   loadStatusConfig,
   statusNeedsIconDownload,
@@ -54,6 +54,22 @@ import type { SessionHeader } from '../sessions/types.ts';
 import { AUTOMATIONS_CONFIG_FILE } from '../automations/constants.ts';
 import { loadAppTheme, loadPresetThemes, loadPresetTheme, getAppThemesDir } from './storage.ts';
 import type { ThemeOverrides, PresetTheme } from './theme.ts';
+
+// ============================================================
+// Active Watcher Registry (duplicate detection)
+// ============================================================
+
+/**
+ * Tracks active ConfigWatcher instances by workspace directory.
+ * Used to detect duplicate recursive watchers on the same directory tree,
+ * which can wedge Bun's event loop on Linux.
+ */
+const activeWatchers = new Map<string, string>(); // workspaceDir → creator workspaceId
+
+/** Exported for testing only */
+export function _getActiveWatchers(): ReadonlyMap<string, string> {
+  return activeWatchers;
+}
 
 // ============================================================
 // Constants
@@ -238,6 +254,14 @@ export class ConfigWatcher {
     const span = perf.span('configWatcher.start', { workspaceId: this.workspaceId });
 
     this.isRunning = true;
+
+    // Detect duplicate recursive watchers on the same directory tree
+    const existingOwner = activeWatchers.get(this.workspaceDir);
+    if (existingOwner) {
+      debug(`[ConfigWatcher] WARNING: duplicate watcher for ${this.workspaceDir} (already owned by: ${existingOwner}, new: ${this.workspaceId})`);
+    }
+    activeWatchers.set(this.workspaceDir, this.workspaceId);
+
     debug('[ConfigWatcher] Starting for workspace:', this.workspaceId);
 
     // Ensure workspace directory exists
@@ -313,6 +337,7 @@ export class ConfigWatcher {
     }
 
     this.isRunning = false;
+    activeWatchers.delete(this.workspaceDir);
 
     // Clear all debounce timers
     for (const timer of this.debounceTimers.values()) {
@@ -750,7 +775,8 @@ export class ConfigWatcher {
         }
       }
 
-      // Notify list change
+      // Invalidate cache before reloading so we get fresh results
+      invalidateSkillsCache();
       const allSkills = loadAllSkills(this.workspaceDir);
       this.callbacks.onSkillsListChange?.(allSkills);
     } catch (error) {
