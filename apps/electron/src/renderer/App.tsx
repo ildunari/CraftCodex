@@ -278,8 +278,8 @@ export default function App() {
   // Reset confirmation dialog
   const [showResetDialog, setShowResetDialog] = useState(false)
 
-  // Auto-update state
-  const updateChecker = useUpdateChecker()
+  // Auto-update side effects: listens for update events and shows restart toast.
+  useUpdateChecker()
 
   // Splash screen state - tracks when app is fully ready (all data loaded)
   const [sessionsLoaded, setSessionsLoaded] = useState(false)

@@ -11,15 +11,15 @@
  * - New Session (model selector group names)
  */
 
-import { Brain } from 'lucide-react'
-import { getProviderIcon } from '@/lib/provider-icons'
+import { Brain, Terminal } from 'lucide-react'
+import { getProviderIcon, providerIcons } from '@/lib/provider-icons'
 import { getModelDisplayName } from '@config/models'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@craft-agent/ui'
 import type { LlmConnectionWithStatus } from '../../../shared/types'
 
 interface ConnectionIconProps {
   /** The connection to display an icon for */
-  connection: Pick<LlmConnectionWithStatus, 'name' | 'providerType' | 'baseUrl' | 'piAuthProvider'> & { type?: string; defaultModel?: string }
+  connection: Pick<LlmConnectionWithStatus, 'name' | 'providerType' | 'baseUrl' | 'piAuthProvider'> & { type?: string; defaultModel?: string; agentId?: string }
   /** Size in pixels (default: 16) */
   size?: number
   /** Additional CSS classes */
@@ -29,27 +29,40 @@ interface ConnectionIconProps {
 }
 
 export function ConnectionIcon({ connection, size = 16, className = '', showTooltip = false }: ConnectionIconProps) {
+  const providerType = connection.providerType || connection.type || ''
   const providerIcon = getProviderIcon(
-    connection.providerType || connection.type || '',
+    providerType,
     connection.baseUrl,
-    connection.piAuthProvider
+    connection.piAuthProvider,
+    connection.name,
+    connection.agentId,
   )
 
+  const FallbackIcon = providerType === 'acp' || providerType === 'codex' ? Terminal : Brain
+  const useLogoTile = providerIcon === providerIcons.codex ||
+    providerIcon === providerIcons.pi_agent ||
+    providerIcon === providerIcons.acp
+
   const iconElement = providerIcon ? (
-    <img
-      src={providerIcon}
-      alt=""
-      width={size}
-      height={size}
-      className={`rounded-[3px] flex-shrink-0 ${className}`}
+    <span
+      className={`inline-flex items-center justify-center rounded-[3px] flex-shrink-0 ${useLogoTile ? 'bg-white shadow-[0_0_0_1px_rgba(0,0,0,0.08)]' : ''} ${className}`}
       style={{ width: size, height: size }}
-    />
+    >
+      <img
+        src={providerIcon}
+        alt=""
+        width={size}
+        height={size}
+        className="rounded-[3px] flex-shrink-0"
+        style={{ width: size, height: size }}
+      />
+    </span>
   ) : (
     <div
       className={`rounded-[3px] bg-foreground/10 flex items-center justify-center flex-shrink-0 ${className}`}
       style={{ width: size, height: size }}
     >
-      <Brain
+      <FallbackIcon
         className="text-foreground/50 flex-shrink-0"
         style={{ width: Math.round(size * 0.7), height: Math.round(size * 0.7) }}
       />

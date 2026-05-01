@@ -465,6 +465,8 @@ export function handleConnectionChanged(
         ...session,
         llmConnection: event.connectionSlug,
         ...(event.supportsBranching !== undefined && { supportsBranching: event.supportsBranching }),
+        ...(event.backendCapabilities !== undefined && { backendCapabilities: event.backendCapabilities }),
+        ...(event.nativeCapabilityManifest !== undefined && { nativeCapabilityManifest: event.nativeCapabilityManifest }),
       },
       streaming,
     },
@@ -906,4 +908,3 @@ export function handleUsageUpdate(
     effects: [],
   }
 }
-

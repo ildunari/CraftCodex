@@ -358,6 +358,10 @@ export const CHANNEL_MAP = {
   testLlmConnection: invoke(RPC_CHANNELS.llmConnections.TEST),
   setDefaultLlmConnection: invoke(RPC_CHANNELS.llmConnections.SET_DEFAULT),
   setWorkspaceDefaultLlmConnection: invoke(RPC_CHANNELS.llmConnections.SET_WORKSPACE_DEFAULT),
+  listAgentCatalog: invoke(RPC_CHANNELS.llmConnections.LIST_AGENT_CATALOG),
+  enableAgent: invoke(RPC_CHANNELS.llmConnections.ENABLE_AGENT),
+  openAgentSetup: invoke(RPC_CHANNELS.llmConnections.OPEN_AGENT_SETUP),
+  saveAgentApiKey: invoke(RPC_CHANNELS.llmConnections.SAVE_AGENT_API_KEY),
 
   // Automations
   testAutomation: invoke(RPC_CHANNELS.automations.TEST),

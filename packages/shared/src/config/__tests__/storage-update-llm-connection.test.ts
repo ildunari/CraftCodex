@@ -115,3 +115,116 @@ describe('updateLlmConnection – customEndpoint', () => {
     expect(conn.customEndpoint).toEqual({ api: 'anthropic-messages' })
   })
 })
+
+describe('updateLlmConnection – ACP', () => {
+  it('preserves native capability policy when updates do not include it', () => {
+    const nativeCapabilityPolicy = {
+      mode: 'craft_only',
+      allowNativeMcp: false,
+      allowNativePlugins: false,
+    }
+    const { runUpdate, readConnection } = setup([
+      makeConnection({
+        slug: 'hermes',
+        name: 'Hermes',
+        providerType: 'acp',
+        agentId: 'hermes',
+        authType: 'none',
+        acpCommand: 'hermes',
+        acpArgs: ['acp', '--accept-hooks'],
+        nativeCapabilityPolicy,
+      }),
+    ])
+
+    const ok = runUpdate('hermes', { name: 'Renamed Hermes' })
+    expect(ok).toBe(true)
+
+    const conn = readConnection('hermes')
+    expect(conn.nativeCapabilityPolicy).toEqual(nativeCapabilityPolicy)
+  })
+
+  it('preserves curated agent identity when updates do not include it', () => {
+    const { runUpdate, readConnection } = setup([
+      makeConnection({
+        slug: 'hermes',
+        name: 'Hermes',
+        providerType: 'acp',
+        agentId: 'hermes',
+        authType: 'none',
+        acpCommand: 'hermes',
+        acpArgs: ['acp', '--accept-hooks'],
+      }),
+    ])
+
+    const ok = runUpdate('hermes', { name: 'Renamed Hermes' })
+    expect(ok).toBe(true)
+
+    const conn = readConnection('hermes')
+    expect(conn.agentId).toBe('hermes')
+    expect(conn.acpCommand).toBe('hermes')
+  })
+
+  it('preserves ACP command fields when updates do not include them', () => {
+    const { runUpdate, readConnection } = setup([
+      makeConnection({
+        slug: 'acp-codex',
+        providerType: 'acp',
+        authType: 'none',
+        acpCommand: 'agent-proxy',
+        acpArgs: ['acp', '--agent', 'codex'],
+      }),
+    ])
+
+    const ok = runUpdate('acp-codex', { name: 'Renamed ACP' })
+    expect(ok).toBe(true)
+
+    const conn = readConnection('acp-codex')
+    expect(conn.name).toBe('Renamed ACP')
+    expect(conn.acpCommand).toBe('agent-proxy')
+    expect(conn.acpArgs).toEqual(['acp', '--agent', 'codex'])
+  })
+
+  it('updates ACP command fields when provided', () => {
+    const { runUpdate, readConnection } = setup([
+      makeConnection({
+        slug: 'acp-droid',
+        providerType: 'acp',
+        authType: 'none',
+        acpCommand: 'droid',
+        acpArgs: ['exec', '--output-format', 'acp'],
+      }),
+    ])
+
+    const ok = runUpdate('acp-droid', {
+      acpCommand: 'agent-proxy',
+      acpArgs: ['acp', '--agent', 'droid'],
+    })
+    expect(ok).toBe(true)
+
+    const conn = readConnection('acp-droid')
+    expect(conn.acpCommand).toBe('agent-proxy')
+    expect(conn.acpArgs).toEqual(['acp', '--agent', 'droid'])
+  })
+})
+
+describe('updateLlmConnection – Codex', () => {
+  it('preserves Codex app-server command fields when updates do not include them', () => {
+    const { runUpdate, readConnection } = setup([
+      makeConnection({
+        slug: 'codex-native',
+        providerType: 'codex',
+        authType: 'none',
+        codexCommand: 'codex',
+        codexArgs: ['app-server', '--listen', 'stdio://'],
+      }),
+    ])
+
+    const ok = runUpdate('codex-native', { name: 'Renamed Codex' })
+    expect(ok).toBe(true)
+
+    const conn = readConnection('codex-native')
+    expect(conn.name).toBe('Renamed Codex')
+    expect(conn.codexCommand).toBe('codex')
+    expect(conn.codexArgs).toEqual(['app-server', '--listen', 'stdio://'])
+  })
+})

@@ -1,15 +1,24 @@
 import { describe, it, expect } from 'bun:test'
 import '../../../tests/setup/register-pi-model-resolver.ts'
 import {
+  AGENT_CATALOG,
+  createConnectionForAgent,
+} from '../agent-catalog'
+import {
   getDefaultModelsForConnection,
   getDefaultModelForConnection,
+  getAvailableModelsForConnection,
+  isModelAvailableForConnection,
   isCompatProvider,
   isAnthropicProvider,
   isPiProvider,
+  isAcpProvider,
+  isCodexProvider,
   toBedrockNativeId,
   fromBedrockNativeId,
   normalizeBedrockModelId,
 } from '../llm-connections'
+import type { LlmConnection } from '../llm-connections'
 import { ANTHROPIC_MODELS, getModelDisplayName, getModelContextWindow, getModelShortName, isClaudeModel } from '../models'
 
 // ============================================================
@@ -55,6 +64,16 @@ describe('getDefaultModelsForConnection', () => {
     const models = getDefaultModelsForConnection('anthropic_compat')
     expect(models).toEqual([])
   })
+
+  it('acp returns empty list (command-backed dynamic provider)', () => {
+    const models = getDefaultModelsForConnection('acp')
+    expect(models).toEqual([])
+  })
+
+  it('codex returns native app-server defaults', () => {
+    const models = getDefaultModelsForConnection('codex')
+    expect(models.map(m => typeof m === 'string' ? m : m.id)).toContain('gpt-5.5')
+  })
 })
 
 // ============================================================
@@ -93,6 +112,114 @@ describe('getDefaultModelForConnection', () => {
   it('returns empty string for pi_compat (dynamic provider)', () => {
     const defaultModel = getDefaultModelForConnection('pi_compat')
     expect(defaultModel).toBe('')
+  })
+
+  it('returns empty string for acp (dynamic provider)', () => {
+    const defaultModel = getDefaultModelForConnection('acp')
+    expect(defaultModel).toBe('')
+  })
+
+  it('returns gpt-5.5 for codex', () => {
+    expect(getDefaultModelForConnection('codex')).toBe('gpt-5.5')
+  })
+})
+
+// ============================================================
+// getAvailableModelsForConnection / isModelAvailableForConnection
+// ============================================================
+
+function testConnection(overrides: Partial<LlmConnection>): LlmConnection {
+  return {
+    slug: overrides.slug ?? 'test',
+    name: overrides.name ?? 'Test',
+    providerType: overrides.providerType ?? 'anthropic',
+    authType: overrides.authType ?? 'api_key',
+    createdAt: 1,
+    ...overrides,
+  }
+}
+
+describe('connection model availability', () => {
+  it('prefers explicit connection models over provider defaults', () => {
+    const connection = testConnection({
+      providerType: 'codex',
+      models: ['gpt-5.5', 'gpt-5.5-low'],
+    })
+
+    expect(getAvailableModelsForConnection(connection)).toEqual(['gpt-5.5', 'gpt-5.5-low'])
+    expect(isModelAvailableForConnection(connection, 'gpt-5.5-low')).toBe(true)
+    expect(isModelAvailableForConnection(connection, 'claude-sonnet-4-6')).toBe(false)
+  })
+
+  it('keeps ACP closed unless the connection declares a model', () => {
+    const connection = testConnection({ providerType: 'acp' })
+
+    expect(getAvailableModelsForConnection(connection)).toEqual([])
+    expect(isModelAvailableForConnection(connection, 'droid-pro')).toBe(false)
+  })
+
+  it('allows a fixed connection default model when no list is available', () => {
+    const connection = testConnection({
+      providerType: 'acp',
+      defaultModel: 'droid-pro',
+    })
+
+    expect(getAvailableModelsForConnection(connection)).toEqual(['droid-pro'])
+    expect(isModelAvailableForConnection(connection, 'droid-pro')).toBe(true)
+  })
+
+  it('falls back to static provider defaults for Codex', () => {
+    const connection = testConnection({ providerType: 'codex' })
+
+    expect(isModelAvailableForConnection(connection, 'gpt-5.5')).toBe(true)
+  })
+})
+
+describe('curated agent catalog', () => {
+  it('creates Hermes as a first-party ACP-backed connection', () => {
+    const hermes = AGENT_CATALOG.find(agent => agent.id === 'hermes')!
+    const connection = createConnectionForAgent(hermes)
+
+    expect(connection).toMatchObject({
+      slug: 'hermes',
+      name: 'Hermes',
+      agentId: 'hermes',
+      providerType: 'acp',
+      authType: 'none',
+      acpCommand: 'hermes',
+      acpArgs: ['acp', '--accept-hooks'],
+      defaultModel: 'gpt-5.5',
+    })
+    expect(hermes.commandProbes).toEqual([
+      { command: 'hermes', args: ['acp', '--help'], label: 'Hermes ACP mode' },
+    ])
+  })
+
+  it('keeps Droid curated above ACP transport details', () => {
+    const droid = AGENT_CATALOG.find(agent => agent.id === 'droid')!
+    const connection = createConnectionForAgent(droid)
+
+    expect(droid.name).toBe('Droid')
+    expect(droid.providerType).toBe('acp')
+    expect(droid.defaultCommand).toBe('droid')
+    expect(droid.defaultArgs).toEqual(['exec', '--output-format', 'acp'])
+    expect(droid.requiredCommands).toEqual(['droid'])
+    expect(droid.models).toEqual(['claude-opus-4-7', 'gpt-5.4', 'gpt-5.3-codex', 'glm-5.1'])
+    expect(droid.defaultModel).toBe('claude-opus-4-7')
+    expect(droid.commandProbes).toEqual([
+      { command: 'droid', args: ['exec', '--help'], label: 'Droid direct ACP mode' },
+    ])
+    expect(connection.acpCommand).toBe('droid')
+    expect(connection.acpArgs).toEqual(['exec', '--output-format', 'acp'])
+  })
+
+  it('probes Codex through its app-server entrypoint', () => {
+    const codex = AGENT_CATALOG.find(agent => agent.id === 'codex')!
+
+    expect(codex.defaultArgs).toEqual(['app-server', '--listen', 'stdio://'])
+    expect(codex.commandProbes).toEqual([
+      { command: 'codex', args: ['app-server', '--help'], label: 'Codex app-server' },
+    ])
   })
 })
 
@@ -151,6 +278,26 @@ describe('isPiProvider', () => {
 
   it('returns false for anthropic', () => {
     expect(isPiProvider('anthropic')).toBe(false)
+  })
+})
+
+describe('isAcpProvider', () => {
+  it('returns true for acp', () => {
+    expect(isAcpProvider('acp')).toBe(true)
+  })
+
+  it('returns false for pi', () => {
+    expect(isAcpProvider('pi')).toBe(false)
+  })
+})
+
+describe('isCodexProvider', () => {
+  it('returns true for codex', () => {
+    expect(isCodexProvider('codex')).toBe(true)
+  })
+
+  it('returns false for acp', () => {
+    expect(isCodexProvider('acp')).toBe(false)
   })
 })
 

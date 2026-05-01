@@ -56,6 +56,8 @@ export interface SessionMeta {
   model?: string
   /** LLM connection slug for this session */
   llmConnection?: string
+  /** Native capability sync/inventory diagnostics for command-backed agents */
+  nativeCapabilityManifest?: Session['nativeCapabilityManifest']
   /** Token usage stats (from JSONL header, available without loading messages) */
   tokenUsage?: {
     inputTokens: number
@@ -98,7 +100,7 @@ export function extractSessionMeta(session: Session): SessionMeta {
 
   // Destructure fields that don't exist on SessionMeta or need overrides
   const {
-    messages: _msgs, sessionFolderPath: _sf, supportsBranching: _sb,
+    messages: _msgs, sessionFolderPath: _sf, supportsBranching: _sb, backendCapabilities: _bc,
     workspaceName: _wn, thinkingLevel: _tl, currentStatus: _cs,
     isAsyncOperationOngoing, isRegeneratingTitle,
     messageCount, lastFinalMessageId: sessionLastFinal,

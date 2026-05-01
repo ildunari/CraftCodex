@@ -68,4 +68,11 @@ describe('channel routing behavior', () => {
       }
     }
   })
+
+  test('local agent setup channels stay on the local Electron backend', () => {
+    expect(LOCAL_ONLY_CHANNELS.has(RPC_CHANNELS.llmConnections.LIST_AGENT_CATALOG)).toBe(true)
+    expect(LOCAL_ONLY_CHANNELS.has(RPC_CHANNELS.llmConnections.ENABLE_AGENT)).toBe(true)
+    expect(LOCAL_ONLY_CHANNELS.has(RPC_CHANNELS.llmConnections.OPEN_AGENT_SETUP)).toBe(true)
+    expect(LOCAL_ONLY_CHANNELS.has(RPC_CHANNELS.llmConnections.SAVE_AGENT_API_KEY)).toBe(true)
+  })
 })

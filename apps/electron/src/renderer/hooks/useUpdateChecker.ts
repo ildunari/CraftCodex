@@ -124,7 +124,11 @@ export function useUpdateChecker(): UseUpdateCheckerResult {
       const info = await window.electronAPI.checkForUpdates()
       setUpdateInfo(info)
 
-      if (!info.available) {
+      if (info.downloadState === 'error') {
+        toast.error('Failed to check for updates', {
+          description: info.error ?? 'Auto-updates are not available for this build.',
+        })
+      } else if (!info.available) {
         toast.success('You\'re up to date', {
           description: `Version ${info.currentVersion} is the latest.`,
           duration: 3000,

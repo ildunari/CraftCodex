@@ -13,15 +13,16 @@ import { useState, useEffect, useCallback, useMemo } from 'react'
 import { PanelHeader } from '@/components/app-shell/PanelHeader'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { HeaderMenu } from '@/components/ui/HeaderMenu'
 import { routes } from '@/lib/navigate'
-import { X, MoreHorizontal, Pencil, Trash2, Star, ChevronDown, ChevronRight, CheckCircle2, AlertTriangle, RefreshCcw, Settings2 } from 'lucide-react'
+import { X, MoreHorizontal, Pencil, Trash2, Star, ChevronDown, ChevronRight, CheckCircle2, AlertTriangle, RefreshCcw, Settings2, ExternalLink, KeyRound } from 'lucide-react'
 import type { CredentialHealthStatus, CredentialHealthIssue } from '../../../shared/types'
 import { Spinner, FullscreenOverlayBase } from '@craft-agent/ui'
 import { useSetAtom } from 'jotai'
 import { fullscreenOverlayOpenAtom } from '@/atoms/overlay'
 import { motion, AnimatePresence } from 'motion/react'
-import type { LlmConnectionWithStatus, ThinkingLevel, WorkspaceSettings, Workspace } from '../../../shared/types'
+import type { AgentCatalogStatus, LlmConnectionWithStatus, ThinkingLevel, WorkspaceSettings, Workspace } from '../../../shared/types'
 import { DEFAULT_THINKING_LEVEL, THINKING_LEVELS } from '@craft-agent/shared/agent/thinking-levels'
 import type { DetailsPageMeta } from '@/lib/navigation-registry'
 import {
@@ -35,6 +36,8 @@ import {
 } from '@/components/ui/styled-dropdown'
 import { cn } from '@/lib/utils'
 import { ConnectionIcon } from '@/components/icons/ConnectionIcon'
+import { getSettingsModelOptions, isConnectionReady } from '@/lib/agent-model-options'
+import { getProviderDisplayName } from '@/lib/provider-icons'
 
 import {
   SettingsSection,
@@ -42,6 +45,7 @@ import {
   SettingsRow,
   SettingsMenuSelectRow,
   SettingsToggle,
+  AgentModelSettingsRows,
 } from '@/components/settings'
 import { useOnboarding } from '@/hooks/useOnboarding'
 import { useWorkspaceIcon } from '@/hooks/useWorkspaceIcon'
@@ -49,37 +53,27 @@ import { OnboardingWizard, type ApiSetupMethod } from '@/components/onboarding'
 import { RenameDialog } from '@/components/ui/rename-dialog'
 import { useAppShellContext } from '@/context/AppShellContext'
 import { getModelShortName, type ModelDefinition } from '@config/models'
-import { getModelsForProviderType, type CustomEndpointApi } from '@config/llm-connections'
+import { type CustomEndpointApi } from '@config/llm-connections'
 import { toast } from 'sonner'
 
-/**
- * Derive model dropdown options from a connection's models array,
- * falling back to registry models for the connection's provider type.
- */
-function getModelOptionsForConnection(
-  connection: LlmConnectionWithStatus | undefined,
-): Array<{ value: string; label: string; description: string }> {
-  if (!connection) return []
+const AGENT_CATALOG_LOAD_TIMEOUT_MS = 12_000
 
-  // If connection has explicit models, use those
-  if (connection.models && connection.models.length > 0) {
-    return connection.models.map((m) => {
-      if (typeof m === 'string') {
-        return { value: m, label: getModelShortName(m), description: '' }
-      }
-      // ModelDefinition object
-      const def = m as ModelDefinition
-      return { value: def.id, label: def.name, description: def.description }
-    })
-  }
+function withAgentCatalogTimeout<T>(promise: Promise<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      reject(new Error('Agent check timed out. The local agent service did not answer in time.'))
+    }, AGENT_CATALOG_LOAD_TIMEOUT_MS)
 
-  // Fall back to registry models for this provider type
-  const registryModels = getModelsForProviderType(connection.providerType, connection.piAuthProvider)
-  return registryModels.map((m) => ({
-    value: m.id,
-    label: m.name,
-    description: m.description,
-  }))
+    promise
+      .then(value => {
+        window.clearTimeout(timer)
+        resolve(value)
+      })
+      .catch(error => {
+        window.clearTimeout(timer)
+        reject(error)
+      })
+  })
 }
 
 export const meta: DetailsPageMeta = {
@@ -114,7 +108,7 @@ function CredentialHealthBanner({ issues, onReauthenticate }: CredentialHealthBa
   if (issues.length === 0) return null
 
   return (
-    <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 mb-6">
+    <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 dark:border-amber-400/20 dark:bg-amber-400/10 p-4 mb-6">
       <div className="flex items-start gap-3">
         <AlertTriangle className="h-5 w-5 text-amber-500 flex-shrink-0 mt-0.5" />
         <div className="flex-1 min-w-0">
@@ -129,7 +123,7 @@ function CredentialHealthBanner({ issues, onReauthenticate }: CredentialHealthBa
           variant="outline"
           size="sm"
           onClick={onReauthenticate}
-          className="flex-shrink-0 border-amber-500/30 text-amber-700 dark:text-amber-400 hover:bg-amber-500/10"
+          className="flex-shrink-0 border-amber-500/30 text-amber-700 hover:bg-amber-500/10 dark:border-amber-400/30 dark:text-amber-300 dark:hover:bg-amber-400/10"
         >
           Re-authenticate
         </Button>
@@ -228,7 +222,7 @@ function ConnectionRow({ connection, isLastConnection, onRenameClick, onDelete, 
         break
       }
       case 'pi_compat': parts.push('Craft Agents Backend Compatible'); break
-      default: parts.push(provider || 'Unknown')
+      default: parts.push(provider ? getProviderDisplayName(provider, connection.baseUrl) : 'Unknown')
     }
 
     // Base URL for API key connections (show custom endpoint or default for provider)
@@ -392,10 +386,19 @@ function WorkspaceOverrideCard({ workspace, llmConnections, onSettingsChange }: 
     }
   }, [workspace.id, onSettingsChange, settings])
 
-  const handleConnectionChange = useCallback((slug: string) => {
+  const handleConnectionChange = useCallback(async (slug: string) => {
     // 'global' means use app default (clear workspace override)
-    updateSetting('defaultLlmConnection', slug === 'global' ? undefined : slug)
-  }, [updateSetting])
+    await updateSetting('defaultLlmConnection', slug === 'global' ? undefined : slug)
+    const selectedModel = settings?.model
+    if (!selectedModel) return
+    const nextConnection = slug === 'global'
+      ? llmConnections.find(c => c.isDefault && isConnectionReady(c)) ?? llmConnections.find(isConnectionReady)
+      : llmConnections.find(c => c.slug === slug)
+    const nextModels = getSettingsModelOptions(nextConnection).map(option => option.value)
+    if (nextModels.length > 0 && !nextModels.includes(selectedModel)) {
+      await updateSetting('model', undefined)
+    }
+  }, [llmConnections, settings?.model, updateSetting])
 
   const handleModelChange = useCallback((model: string) => {
     // 'global' means use app default (clear workspace override)
@@ -489,31 +492,14 @@ function WorkspaceOverrideCard({ workspace, llmConnections, onSettingsChange }: 
             className="overflow-hidden"
           >
             <div className="border-t border-border/50 px-4 py-2">
-              <SettingsMenuSelectRow
-                label="Connection"
-                description="API connection for new chats"
-                value={currentConnection}
-                onValueChange={handleConnectionChange}
-                options={[
-                  { value: 'global', label: 'Use default', description: 'Inherit from app settings' },
-                  ...llmConnections.map((conn) => ({
-                    value: conn.slug,
-                    label: conn.name,
-                    description: conn.providerType === 'anthropic' ? 'Anthropic' :
-                                 conn.providerType === 'pi' ? 'Craft Agents Backend' :
-                                 conn.providerType || 'Unknown',
-                  })),
-                ]}
-              />
-              <SettingsMenuSelectRow
-                label="Model"
-                description="AI model for new chats"
-                value={currentModel}
-                onValueChange={handleModelChange}
-                options={[
-                  { value: 'global', label: 'Use default', description: 'Inherit from app settings' },
-                  ...getModelOptionsForConnection(workspaceEffectiveConnection),
-                ]}
+              <AgentModelSettingsRows
+                connections={llmConnections}
+                selectedConnection={workspaceEffectiveConnection}
+                connectionValue={currentConnection}
+                modelValue={currentModel}
+                onConnectionChange={handleConnectionChange}
+                onModelChange={handleModelChange}
+                includeGlobalOption
               />
               <SettingsMenuSelectRow
                 label="Thinking"
@@ -548,6 +534,72 @@ function getApiKeyMethodForConnection(conn: LlmConnectionWithStatus): ApiSetupMe
   return 'anthropic_api_key'
 }
 
+interface AgentCatalogRowProps {
+  agent: AgentCatalogStatus
+  onEnable: () => void
+  onSetup: () => void
+  onApiKeySetup?: () => void
+  onRecheck: () => void
+  busy?: boolean
+}
+
+function AgentCatalogRow({ agent, onEnable, onSetup, onApiKeySetup, onRecheck, busy }: AgentCatalogRowProps) {
+  const isReady = agent.ready
+  const canSaveApiKey = agent.id === 'droid' && agent.installed
+  const actionLabel = !agent.installed
+    ? agent.installLabel
+    : agent.configured
+      ? 'Re-check'
+      : agent.setupLabel
+  const action = !agent.installed ? onSetup : agent.configured ? onRecheck : onEnable
+  const Icon = !agent.installed ? ExternalLink : agent.configured ? RefreshCcw : CheckCircle2
+  const statusText = isReady
+    ? 'Enabled'
+    : !agent.installed
+      ? 'Not installed'
+      : agent.configured
+        ? agent.message?.toLowerCase().includes('authentication')
+          ? 'Needs sign-in'
+          : 'Needs attention'
+        : 'Available'
+
+  return (
+    <SettingsRow
+      label={(
+        <div className="flex items-center gap-1.5">
+          <ConnectionIcon
+            connection={{ name: agent.name, providerType: agent.providerType, agentId: agent.id }}
+            size={14}
+          />
+          <span>{agent.name}</span>
+          <span className={cn(
+            'inline-flex items-center h-5 px-2 text-[11px] font-medium rounded-[4px] bg-background shadow-minimal',
+            isReady ? 'text-foreground/60' : 'text-muted-foreground',
+          )}>
+            {statusText}
+          </span>
+        </div>
+      )}
+      description={agent.message || agent.description}
+    >
+      {(!isReady || agent.configured) && (
+        <div className="flex items-center gap-1.5">
+          {canSaveApiKey && onApiKeySetup && (
+            <Button size="sm" variant="ghost" className="h-8 gap-1.5" onClick={onApiKeySetup} disabled={busy}>
+              <KeyRound className="size-3.5" />
+              Factory key
+            </Button>
+          )}
+          <Button size="sm" variant="ghost" className="h-8 gap-1.5" onClick={action} disabled={busy}>
+            {busy ? <Spinner className="size-3.5" /> : <Icon className="size-3.5" />}
+            {actionLabel}
+          </Button>
+        </div>
+      )}
+    </SettingsRow>
+  )
+}
+
 // ============================================
 // Main Component
 // ============================================
@@ -571,6 +623,13 @@ export default function AiSettingsPage() {
 
   // Workspaces for override cards
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
+  const [agentCatalog, setAgentCatalog] = useState<AgentCatalogStatus[]>([])
+  const [agentCatalogLoading, setAgentCatalogLoading] = useState(true)
+  const [agentCatalogError, setAgentCatalogError] = useState<string | null>(null)
+  const [agentActionBusy, setAgentActionBusy] = useState<Record<string, boolean>>({})
+  const [droidApiKeyOpen, setDroidApiKeyOpen] = useState(false)
+  const [droidApiKey, setDroidApiKey] = useState('')
+  const [droidApiKeySaving, setDroidApiKeySaving] = useState(false)
 
   // Default settings state (app-level)
   const [defaultThinking, setDefaultThinking] = useState<ThinkingLevel>(DEFAULT_THINKING_LEVEL)
@@ -591,13 +650,33 @@ export default function AiSettingsPage() {
   const [renamingConnection, setRenamingConnection] = useState<{ slug: string; name: string } | null>(null)
   const [renameValue, setRenameValue] = useState('')
 
-  // Load workspaces, default settings, and credential health
+  const loadAgentCatalog = useCallback(async () => {
+    if (!window.electronAPI?.listAgentCatalog) {
+      setAgentCatalogLoading(false)
+      setAgentCatalogError('This CraftCodex build does not expose local agent management. Restart the latest app build and try again.')
+      return
+    }
+    setAgentCatalogLoading(true)
+    setAgentCatalogError(null)
+    try {
+      setAgentCatalog(await withAgentCatalogTimeout(window.electronAPI.listAgentCatalog()))
+    } catch (error) {
+      console.error('Failed to load agent catalog:', error)
+      setAgentCatalog([])
+      setAgentCatalogError(error instanceof Error ? error.message : 'Failed to load local agents.')
+    } finally {
+      setAgentCatalogLoading(false)
+    }
+  }, [])
+
+  // Load workspaces, default settings, agent catalog, and credential health
   useEffect(() => {
     const load = async () => {
       if (!window.electronAPI) return
       try {
         const ws = await window.electronAPI.getWorkspaces()
         setWorkspaces(ws)
+        await loadAgentCatalog()
 
         const defaultThinkingLevel = await window.electronAPI.getDefaultThinkingLevel()
         setDefaultThinking(defaultThinkingLevel)
@@ -618,7 +697,7 @@ export default function AiSettingsPage() {
       }
     }
     load()
-  }, [activeWorkspaceId])
+  }, [activeWorkspaceId, loadAgentCatalog])
 
   // Helpers to open/close the fullscreen API setup overlay
   const openApiSetup = useCallback((connectionSlug?: string) => {
@@ -836,10 +915,16 @@ export default function AiSettingsPage() {
 
   // Get the default connection for display
   const defaultConnection = useMemo(() => {
-    return llmConnections.find(c => c.isDefault)
+    return llmConnections.find(c => c.isDefault && isConnectionReady(c))
+      ?? llmConnections.find(isConnectionReady)
   }, [llmConnections])
 
-  const defaultModel = defaultConnection?.defaultModel ?? ''
+  const readyLlmConnections = useMemo(
+    () => llmConnections.filter(isConnectionReady),
+    [llmConnections],
+  )
+
+  const defaultModel = defaultConnection?.defaultModel || getSettingsModelOptions(defaultConnection)[0]?.value || ''
 
   // App-level default handlers
   const handleDefaultModelChange = useCallback(async (model: string) => {
@@ -847,7 +932,7 @@ export default function AiSettingsPage() {
     // Update defaultModel on the connection, then save the full connection
     const updated = { ...defaultConnection, defaultModel: model }
     // Remove status fields that aren't part of LlmConnection
-    const { isAuthenticated: _a, authError: _b, isDefault: _c, ...connectionData } = updated
+    const { isAuthenticated: _a, authError: _b, isDefault: _c, agentStatus: _d, ...connectionData } = updated
     await window.electronAPI.saveLlmConnection(connectionData as import('../../../shared/types').LlmConnection)
     await refreshLlmConnections()
   }, [defaultConnection, refreshLlmConnections])
@@ -886,6 +971,88 @@ export default function AiSettingsPage() {
     refreshLlmConnections?.()
   }, [refreshLlmConnections])
 
+  const runAgentAction = useCallback(async (
+    agentId: string,
+    action: () => Promise<{ success: boolean; error?: string; message?: string }>,
+  ) => {
+    setAgentActionBusy(prev => ({ ...prev, [agentId]: true }))
+    try {
+      const result = await action()
+      if (result.success) {
+        if (result.message) toast.success(result.message)
+        await refreshLlmConnections?.()
+        await loadAgentCatalog()
+      } else {
+        toast.error(result.error || 'Agent action failed')
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Agent action failed')
+    } finally {
+      setAgentActionBusy(prev => ({ ...prev, [agentId]: false }))
+    }
+  }, [loadAgentCatalog, refreshLlmConnections])
+
+  const handleEnableAgent = useCallback((agentId: string) => {
+    if (!window.electronAPI?.enableAgent) return
+    void runAgentAction(agentId, () => window.electronAPI.enableAgent(agentId))
+  }, [runAgentAction])
+
+  const handleOpenAgentSetup = useCallback((agentId: string) => {
+    if (!window.electronAPI?.openAgentSetup) return
+    void runAgentAction(agentId, () => window.electronAPI.openAgentSetup(agentId))
+  }, [runAgentAction])
+
+  const handleOpenDroidApiKeySetup = useCallback(() => {
+    setDroidApiKey('')
+    setDroidApiKeyOpen(true)
+  }, [])
+
+  const handleSaveDroidApiKey = useCallback(async () => {
+    if (!window.electronAPI?.saveAgentApiKey) return
+    const trimmed = droidApiKey.trim()
+    if (!trimmed) {
+      toast.error('Enter a Factory API key.')
+      return
+    }
+
+    setDroidApiKeySaving(true)
+    setAgentActionBusy(prev => ({ ...prev, droid: true }))
+    try {
+      const result = await window.electronAPI.saveAgentApiKey('droid', trimmed)
+      if (!result.success) {
+        toast.error(result.error || 'Failed to save Droid Factory key')
+        return
+      }
+      toast.success(result.message || 'Droid Factory key saved.')
+      setDroidApiKey('')
+      setDroidApiKeyOpen(false)
+      await refreshLlmConnections?.()
+      await loadAgentCatalog()
+      if (result.connectionSlug && window.electronAPI?.testLlmConnection) {
+        const testResult = await window.electronAPI.testLlmConnection(result.connectionSlug)
+        if (!testResult.success) {
+          toast.error(testResult.error || 'Droid still needs attention')
+        }
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to save Droid Factory key')
+    } finally {
+      setDroidApiKeySaving(false)
+      setAgentActionBusy(prev => ({ ...prev, droid: false }))
+    }
+  }, [droidApiKey, loadAgentCatalog, refreshLlmConnections])
+
+  const handleRecheckAgent = useCallback((agent: AgentCatalogStatus) => {
+    void runAgentAction(agent.id, async () => {
+      if (agent.connectionSlug && window.electronAPI?.testLlmConnection) {
+        const result = await window.electronAPI.testLlmConnection(agent.connectionSlug)
+        if (!result.success) return { success: false, error: result.error }
+      }
+      await loadAgentCatalog()
+      return { success: true }
+    })
+  }, [loadAgentCatalog, runAgentAction])
+
   return (
     <div className="h-full flex flex-col">
       <PanelHeader title="AI" actions={<HeaderMenu route={routes.view.settings('ai')} />} />
@@ -899,32 +1066,59 @@ export default function AiSettingsPage() {
             />
 
             <div className="space-y-8">
-              {/* Default Settings - only show if connections exist */}
-              {llmConnections.length > 0 && (
+              <SettingsSection title="Agents" description="Install or sign in to local agents. Once ready, they appear in the chat picker.">
+                <SettingsCard>
+                  {agentCatalog.map((agent) => (
+                    <AgentCatalogRow
+                      key={agent.id}
+                      agent={agent}
+                      busy={agentActionBusy[agent.id]}
+                      onEnable={() => handleEnableAgent(agent.id)}
+                      onSetup={() => handleOpenAgentSetup(agent.id)}
+                      onApiKeySetup={agent.id === 'droid' ? handleOpenDroidApiKeySetup : undefined}
+                      onRecheck={() => handleRecheckAgent(agent)}
+                    />
+                  ))}
+                  {agentCatalogLoading && agentCatalog.length === 0 && (
+                    <div className="px-4 py-6 text-center text-sm text-muted-foreground">
+                      <Spinner className="mx-auto mb-2 h-4 w-4" />
+                      Checking local agents...
+                    </div>
+                  )}
+                  {!agentCatalogLoading && agentCatalogError && agentCatalog.length === 0 && (
+                    <div className="px-4 py-6 text-center text-sm text-muted-foreground space-y-3">
+                      <div className="mx-auto flex h-8 w-8 items-center justify-center rounded-full bg-destructive/10 text-destructive">
+                        <AlertTriangle className="h-4 w-4" />
+                      </div>
+                      <div>
+                        <p className="font-medium text-foreground">Could not load local agents</p>
+                        <p className="mt-1">{agentCatalogError}</p>
+                      </div>
+                      <Button variant="outline" size="sm" onClick={() => void loadAgentCatalog()}>
+                        <RefreshCcw className="mr-1.5 h-3.5 w-3.5" />
+                        Retry
+                      </Button>
+                    </div>
+                  )}
+                  {!agentCatalogLoading && !agentCatalogError && agentCatalog.length === 0 && (
+                    <div className="px-4 py-6 text-center text-sm text-muted-foreground">
+                      No local agents found.
+                    </div>
+                  )}
+                </SettingsCard>
+              </SettingsSection>
+
+              {/* Default Settings - only show if ready connections exist */}
+              {readyLlmConnections.length > 0 && (
               <SettingsSection title="Default" description="Settings for new chats when no workspace override is set.">
                 <SettingsCard>
-                  <SettingsMenuSelectRow
-                    label="Connection"
-                    description="API connection for new chats"
-                    value={defaultConnection?.slug || ''}
-                    onValueChange={handleSetDefaultConnection}
-                    options={llmConnections.map((conn) => ({
-                      value: conn.slug,
-                      label: conn.name,
-                      description: conn.providerType === 'anthropic' ? 'Anthropic API' :
-                                   conn.providerType === 'bedrock' ? 'AWS Bedrock' :
-                                   conn.providerType === 'vertex' ? 'Google Vertex' :
-                                   conn.providerType === 'pi' ? 'Craft Agents Backend' :
-                                   conn.providerType === 'pi_compat' ? 'Craft Agents Backend Compatible' :
-                                   conn.providerType || 'Unknown',
-                    }))}
-                  />
-                  <SettingsMenuSelectRow
-                    label="Model"
-                    description="AI model for new chats"
-                    value={defaultModel}
-                    onValueChange={handleDefaultModelChange}
-                    options={getModelOptionsForConnection(defaultConnection)}
+                  <AgentModelSettingsRows
+                    connections={readyLlmConnections}
+                    selectedConnection={defaultConnection}
+                    connectionValue={defaultConnection?.slug || ''}
+                    modelValue={defaultModel}
+                    onConnectionChange={handleSetDefaultConnection}
+                    onModelChange={handleDefaultModelChange}
                   />
                   <SettingsMenuSelectRow
                     label="Thinking"
@@ -942,14 +1136,14 @@ export default function AiSettingsPage() {
               )}
 
               {/* Workspace Overrides - only show if connections exist */}
-              {workspaces.length > 0 && llmConnections.length > 0 && (
+              {workspaces.length > 0 && readyLlmConnections.length > 0 && (
                 <SettingsSection title="Workspace Overrides" description="Override default settings per workspace.">
                   <div className="space-y-2">
                     {workspaces.map((workspace) => (
                       <WorkspaceOverrideCard
                         key={workspace.id}
                         workspace={workspace}
-                        llmConnections={llmConnections}
+                        llmConnections={readyLlmConnections}
                         onSettingsChange={handleWorkspaceSettingsChange}
                       />
                     ))}
@@ -975,7 +1169,7 @@ export default function AiSettingsPage() {
                       <ConnectionRow
                         key={conn.slug}
                         connection={conn}
-                        isLastConnection={false}
+                        isLastConnection={llmConnections.length === 1}
                         onRenameClick={() => handleRenameClick(conn)}
                         onDelete={() => handleDeleteConnection(conn.slug)}
                         onSetDefault={() => handleSetDefaultConnection(conn.slug)}
@@ -1015,6 +1209,80 @@ export default function AiSettingsPage() {
                   />
                 </SettingsCard>
               </SettingsSection>
+
+              <FullscreenOverlayBase
+                isOpen={droidApiKeyOpen}
+                onClose={() => !droidApiKeySaving && setDroidApiKeyOpen(false)}
+                className="z-splash flex items-center justify-center bg-black/35"
+              >
+                <form
+                  className="w-full max-w-md rounded-[8px] border border-border bg-background p-5 shadow-xl"
+                  onSubmit={(event) => {
+                    event.preventDefault()
+                    void handleSaveDroidApiKey()
+                  }}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h2 className="text-base font-semibold">Droid Factory Key</h2>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        Store a Factory API key for Droid. BYOK model keys stay in Factory settings.
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="ghost"
+                      className="h-8 w-8"
+                      onClick={() => setDroidApiKeyOpen(false)}
+                      disabled={droidApiKeySaving}
+                      title="Close"
+                    >
+                      <X className="size-4" />
+                    </Button>
+                  </div>
+                  <div className="mt-5 space-y-2">
+                    <label className="text-xs font-medium text-muted-foreground" htmlFor="droid-factory-api-key">
+                      Factory API key
+                    </label>
+                    <Input
+                      id="droid-factory-api-key"
+                      type="password"
+                      autoComplete="off"
+                      value={droidApiKey}
+                      onChange={(event) => setDroidApiKey(event.target.value)}
+                      placeholder="fk-..."
+                      disabled={droidApiKeySaving}
+                    />
+                  </div>
+                  <div className="mt-5 flex items-center justify-between gap-3">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      className="h-8 gap-1.5"
+                      onClick={() => window.electronAPI?.openUrl?.('https://app.factory.ai/settings/api-keys')}
+                    >
+                      <ExternalLink className="size-3.5" />
+                      Create key
+                    </Button>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        className="h-8"
+                        onClick={() => setDroidApiKeyOpen(false)}
+                        disabled={droidApiKeySaving}
+                      >
+                        Cancel
+                      </Button>
+                      <Button type="submit" className="h-8 gap-1.5" disabled={droidApiKeySaving}>
+                        {droidApiKeySaving && <Spinner className="size-3.5" />}
+                        Save
+                      </Button>
+                    </div>
+                  </div>
+                </form>
+              </FullscreenOverlayBase>
 
               {/* API Setup Fullscreen Overlay */}
               <FullscreenOverlayBase

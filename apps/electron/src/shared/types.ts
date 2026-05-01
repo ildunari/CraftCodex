@@ -190,6 +190,8 @@ import type {
   LlmConnectionSetup,
   TestLlmConnectionParams,
   TestLlmConnectionResult,
+  AgentCatalogActionResult,
+  AgentCatalogStatus,
   SkillFile,
   SessionFile,
   OAuthResult,
@@ -607,6 +609,10 @@ export interface ElectronAPI {
   deleteLlmConnection(slug: string): Promise<{ success: boolean; error?: string }>
   testLlmConnection(slug: string): Promise<{ success: boolean; error?: string }>
   setDefaultLlmConnection(slug: string): Promise<{ success: boolean; error?: string }>
+  listAgentCatalog(): Promise<AgentCatalogStatus[]>
+  enableAgent(agentId: string): Promise<AgentCatalogActionResult>
+  openAgentSetup(agentId: string): Promise<AgentCatalogActionResult>
+  saveAgentApiKey(agentId: string, apiKey: string): Promise<AgentCatalogActionResult>
   getDefaultThinkingLevel(): Promise<ThinkingLevel>
   setDefaultThinkingLevel(level: ThinkingLevel): Promise<{ success: boolean; error?: string }>
   setWorkspaceDefaultLlmConnection(workspaceId: string, slug: string | null): Promise<{ success: boolean; error?: string }>

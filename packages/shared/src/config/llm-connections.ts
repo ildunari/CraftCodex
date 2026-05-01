@@ -16,6 +16,8 @@ import {
   ANTHROPIC_MODELS,
 } from './models';
 import type { CredentialManager } from '../credentials/manager.ts';
+import type { NativeCapabilityPolicy } from '../agent/backend/native-capabilities.ts';
+import type { AgentCatalogId } from './agent-catalog.ts';
 
 // ============================================================
 // Pi Model Resolver (dependency injection to avoid Pi SDK in renderer)
@@ -47,6 +49,8 @@ export function registerPiModelResolver(resolver: PiModelResolver): void {
  * - 'vertex': Google Vertex AI (Claude models via GCP)
  * - 'pi': Pi unified LLM API (20+ providers via @mariozechner/pi-ai)
  * - 'pi_compat': Pi with custom endpoint (Ollama, self-hosted models)
+ * - 'acp': Agent Client Protocol stdio bridge (Codex, Droid, or compatible gateways)
+ * - 'codex': Native Codex app-server backend
  */
 export type LlmProviderType =
   | 'anthropic'
@@ -54,7 +58,9 @@ export type LlmProviderType =
   | 'bedrock'
   | 'vertex'
   | 'pi'
-  | 'pi_compat';
+  | 'pi_compat'
+  | 'acp'
+  | 'codex';
 
 /**
  * @deprecated Use LlmProviderType instead. Kept for migration compatibility.
@@ -126,6 +132,9 @@ export interface LlmConnection {
   /** Provider type determines backend/SDK implementation */
   providerType: LlmProviderType;
 
+  /** Curated first-party agent identity. ACP remains an internal transport. */
+  agentId?: AgentCatalogId;
+
   /**
    * @deprecated Use providerType instead. Kept for migration compatibility.
    * Will be removed in a future version.
@@ -165,6 +174,37 @@ export interface LlmConnection {
    */
   customEndpoint?: CustomEndpointConfig;
 
+  /**
+ * Command used for ACP stdio bridges. Examples:
+ *   - "codex"
+ *   - "droid"
+ *   - "agent-proxy"
+   */
+  acpCommand?: string;
+
+  /**
+   * Arguments passed to acpCommand. For Droid's direct ACP mode this is
+   * ["exec", "--output-format", "acp"]. The optional local agent-proxy bridge
+   * commonly uses ["acp", "--agent", "codex"] or ["acp", "--agent", "droid"].
+   */
+  acpArgs?: string[];
+
+  /**
+   * Command used for native Codex app-server backends. Defaults to "codex".
+   */
+  codexCommand?: string;
+
+  /**
+   * Arguments passed to codexCommand. Defaults to ["app-server", "--listen", "stdio://"].
+   */
+  codexArgs?: string[];
+
+  /**
+   * Policy for inheriting native capabilities from command-backed agents.
+   * Craft remains authoritative by default and native-only capabilities pass through.
+   */
+  nativeCapabilityPolicy?: Partial<NativeCapabilityPolicy>;
+
   // --- Cloud provider specific fields ---
 
   /** AWS region (for 'bedrock' provider) */
@@ -195,6 +235,9 @@ export interface LlmConnectionWithStatus extends LlmConnection {
 
   /** Error message if authentication check failed */
   authError?: string;
+
+  /** Runtime/install readiness for curated command-backed agents */
+  agentStatus?: 'ready' | 'needs_setup' | 'not_installed' | 'broken';
 
   /** Whether this is the global default connection */
   isDefault?: boolean;
@@ -410,6 +453,24 @@ export function isPiProvider(providerType: LlmProviderType): boolean {
 }
 
 /**
+ * Check if a provider type speaks Agent Client Protocol over stdio.
+ * @param providerType - Provider type to check
+ * @returns true if this provider uses ACP
+ */
+export function isAcpProvider(providerType: LlmProviderType): boolean {
+  return providerType === 'acp';
+}
+
+/**
+ * Check if a provider type uses native Codex app-server.
+ * @param providerType - Provider type to check
+ * @returns true if this provider uses Codex app-server
+ */
+export function isCodexProvider(providerType: LlmProviderType): boolean {
+  return providerType === 'codex';
+}
+
+/**
  * Get the default model list for a provider type from the registry.
  * For *_compat providers, returns empty array - those should use connection.models instead.
  *
@@ -426,6 +487,15 @@ export function getModelsForProviderType(providerType: LlmProviderType, piAuthPr
   // Pi: fetch models via registered resolver (avoids Pi SDK import in renderer)
   if (providerType === 'pi') {
     return _piModelResolver(piAuthProvider);
+  }
+
+  // ACP backends are command/gateway driven; models are declared on the connection.
+  if (providerType === 'acp') {
+    return [];
+  }
+
+  if (providerType === 'codex') {
+    return [];
   }
 
   // Anthropic, Bedrock, Vertex use Claude models with bare Anthropic IDs.
@@ -481,8 +551,43 @@ export function getDefaultModelsForConnection(providerType: LlmProviderType, piA
   }
   if (providerType === 'pi_compat') return [];  // Dynamic — user specifies
   if (providerType === 'anthropic_compat') return [];  // Dynamic — user specifies
+  if (providerType === 'acp') return [];  // Dynamic — command/gateway specifies
+  if (providerType === 'codex') return [{ id: 'gpt-5.5', name: 'GPT-5.5', shortName: 'GPT-5.5', description: 'Codex app-server default model', provider: 'codex', contextWindow: 272_000 }];
   // anthropic, bedrock, vertex
   return ANTHROPIC_MODELS;
+}
+
+/**
+ * Get the model list a specific connection can expose to users.
+ *
+ * Priority:
+ * 1. The connection's explicit model list, usually refreshed from the backend.
+ * 2. Provider defaults for static providers such as Claude/Pi/Codex.
+ * 3. A configured connection default model for fixed custom/agent endpoints.
+ */
+export function getAvailableModelsForConnection(connection: LlmConnection): Array<ModelDefinition | string> {
+  if (connection.models && connection.models.length > 0) return connection.models;
+
+  const defaults = getDefaultModelsForConnection(connection.providerType, connection.piAuthProvider);
+  if (defaults.length > 0) return defaults;
+
+  if (connection.defaultModel) return [connection.defaultModel];
+
+  return [];
+}
+
+export function getModelIdFromEntry(model: ModelDefinition | string): string {
+  return typeof model === 'string' ? model : model.id;
+}
+
+/**
+ * Validate that a model belongs to the selected agent connection.
+ * Dynamic agent connections such as ACP must declare or discover models before
+ * arbitrary model IDs are accepted.
+ */
+export function isModelAvailableForConnection(connection: LlmConnection, model: string | null | undefined): boolean {
+  if (!model) return true;
+  return getAvailableModelsForConnection(connection).some((entry) => getModelIdFromEntry(entry) === model);
 }
 
 /**
@@ -571,6 +676,8 @@ export function isValidProviderAuthCombination(
     vertex: ['oauth', 'service_account_file', 'environment'],
     pi: ['api_key', 'oauth', 'none'],
     pi_compat: ['api_key_with_endpoint', 'none'],
+    acp: ['none'],
+    codex: ['none'],
   };
 
   return validCombinations[providerType]?.includes(authType) ?? false;

@@ -74,7 +74,7 @@ export function ProviderSelectStep({ onSelect, onSkip }: ProviderSelectStepProps
           <CraftAgentsSymbol className="size-10 text-accent" />
         </div>
       }
-      title="Welcome to Craft Agents"
+      title="Welcome to CraftCodex"
       description="How would you like to connect?"
     >
       <div className="space-y-3">

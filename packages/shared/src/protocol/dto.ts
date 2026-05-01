@@ -16,12 +16,16 @@ import type {
 } from '@craft-agent/core/types'
 import type { PermissionMode } from '../agent/mode-types'
 import type { ThinkingLevel } from '../agent/thinking-levels'
+import type { AgentBackendCapabilities, NativeCapabilitySyncManifest } from '../agent/backend'
 import type { CustomEndpointConfig } from '../config/llm-connections'
 import type {
   AuthRequest as SharedAuthRequest,
   CredentialInputMode as SharedCredentialInputMode,
   CredentialAuthRequest as SharedCredentialAuthRequest,
 } from '../agent/index'
+
+export type { AgentBackendCapabilities } from '../agent/backend'
+export type { NativeCapabilitySyncManifest } from '../agent/backend'
 
 // Re-export generateMessageId for handler convenience
 export { generateMessageId } from '@craft-agent/core/types'
@@ -101,6 +105,8 @@ export interface Session {
   isArchived?: boolean
   archivedAt?: number
   supportsBranching?: boolean
+  backendCapabilities?: AgentBackendCapabilities
+  nativeCapabilityManifest?: NativeCapabilitySyncManifest
 }
 
 export interface CreateSessionOptions {
@@ -178,7 +184,7 @@ export type SessionEvent =
   | { type: 'plan_submitted'; sessionId: string; message: Message }
   | { type: 'sources_changed'; sessionId: string; enabledSourceSlugs: string[] }
   | { type: 'labels_changed'; sessionId: string; labels: string[] }
-  | { type: 'connection_changed'; sessionId: string; connectionSlug: string; supportsBranching?: boolean }
+  | { type: 'connection_changed'; sessionId: string; connectionSlug: string; supportsBranching?: boolean; backendCapabilities?: AgentBackendCapabilities; nativeCapabilityManifest?: NativeCapabilitySyncManifest }
   | { type: 'task_backgrounded'; sessionId: string; toolUseId: string; taskId: string; intent?: string; turnId?: string }
   | { type: 'shell_backgrounded'; sessionId: string; toolUseId: string; shellId: string; intent?: string; command?: string; turnId?: string }
   | { type: 'task_progress'; sessionId: string; toolUseId: string; elapsedSeconds: number; turnId?: string }
@@ -359,18 +365,32 @@ export interface LlmConnectionSetup {
 }
 
 export interface TestLlmConnectionParams {
-  provider: 'anthropic' | 'pi'
+  provider: 'anthropic' | 'pi' | 'acp' | 'codex'
   apiKey: string
   baseUrl?: string
   model?: string
   piAuthProvider?: string
   /** Optional custom endpoint protocol hint so setup tests mirror runtime routing */
   customEndpoint?: CustomEndpointConfig
+  /** Optional command overrides so setup tests mirror command-backed runtime routing */
+  acpCommand?: string
+  acpArgs?: string[]
+  codexCommand?: string
+  codexArgs?: string[]
 }
 
 export interface TestLlmConnectionResult {
   success: boolean
   error?: string
+}
+
+export type { AgentCatalogStatus } from '../config/agent-catalog'
+
+export interface AgentCatalogActionResult {
+  success: boolean
+  error?: string
+  message?: string
+  connectionSlug?: string
 }
 
 // ---------------------------------------------------------------------------

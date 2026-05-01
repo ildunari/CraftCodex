@@ -33,6 +33,11 @@ import type { ModelProvider } from '../../config/models.ts';
 import type { LlmAuthType, LlmProviderType } from '../../config/llm-connections.ts';
 export type { LlmAuthType, LlmProviderType } from '../../config/llm-connections.ts';
 import type { AutomationSystem } from '../../automations/index.ts';
+import type {
+  NativeCapabilityInventory,
+  NativeCapabilityPolicy,
+  NativeCapabilitySyncManifest,
+} from './native-capabilities.ts';
 
 /**
  * Provider identifier for AI backends.
@@ -255,6 +260,15 @@ export interface CoreBackendConfig {
     apiServers: Record<string, unknown>;
     enabledSlugs: string[];
   };
+
+  /** Craft-first native capability policy for command-backed agents. */
+  nativeCapabilityPolicy?: Partial<NativeCapabilityPolicy>;
+
+  /** Craft-owned capabilities used to shadow native duplicates. */
+  craftCapabilityInventory?: NativeCapabilityInventory;
+
+  /** Last native capability sync/inventory manifest for diagnostics. */
+  nativeCapabilityManifest?: NativeCapabilitySyncManifest;
 }
 
 // ============================================================
@@ -452,6 +466,9 @@ export interface AgentBackend {
 
   /** Whether this backend supports session branching */
   readonly supportsBranching: boolean;
+
+  /** Native capability sync/inventory diagnostics for command-backed agents. */
+  getNativeCapabilityManifest?(): NativeCapabilitySyncManifest | null;
 
   // ============================================================
   // Source Management

@@ -43,6 +43,7 @@ Arguments:
 
 Environment variables (from .env or environment):
   S3_VERSIONS_BUCKET_*      - S3 credentials (for --upload)
+  CRAFTCODEX_UPDATE_FEED_URL - Feed URL to bake into CraftCodex update-enabled builds
 EOF
     exit 0
 }
@@ -191,10 +192,11 @@ if [ "$UPLOAD" = true ]; then
     echo "=== Uploading to S3 ==="
 
     # Check for S3 credentials
-    if [ -z "$S3_VERSIONS_BUCKET_ENDPOINT" ] || [ -z "$S3_VERSIONS_BUCKET_ACCESS_KEY_ID" ] || [ -z "$S3_VERSIONS_BUCKET_SECRET_ACCESS_KEY" ]; then
+    if [ -z "$S3_VERSIONS_BUCKET_ENDPOINT" ] || { [ -z "$S3_VERSIONS_BUCKET_NAME" ] && [ -z "$S3_VERSIONS_BUCKET" ]; } || [ -z "$S3_VERSIONS_BUCKET_ACCESS_KEY_ID" ] || [ -z "$S3_VERSIONS_BUCKET_SECRET_ACCESS_KEY" ]; then
         cat << EOF
 ERROR: Missing S3 credentials. Set these environment variables:
   S3_VERSIONS_BUCKET_ENDPOINT
+  S3_VERSIONS_BUCKET_NAME (or S3_VERSIONS_BUCKET)
   S3_VERSIONS_BUCKET_ACCESS_KEY_ID
   S3_VERSIONS_BUCKET_SECRET_ACCESS_KEY
 

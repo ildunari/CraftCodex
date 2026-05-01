@@ -10,6 +10,8 @@ import type { LlmConnection } from '../../../config/storage.ts';
 import type { ModelFetchResult } from '../../../config/model-fetcher.ts';
 import type { CredentialManager } from '../../../credentials/manager.ts';
 import type { ResolvedBackendRuntimePaths } from './runtime-resolver.ts';
+import type { AgentBackendCapabilities } from '../capabilities.ts';
+import type { NativeCapabilityPolicy } from '../native-capabilities.ts';
 
 export interface BackendRuntimePaths {
   copilotCli?: string;
@@ -29,6 +31,20 @@ export interface BackendRuntimePayload extends Record<string, unknown> {
   customEndpoint?: { api: string };
   /** Models registered for a custom endpoint. Strings default to 128K context; objects allow overrides. */
   customModels?: Array<string | { id: string; contextWindow?: number }>;
+  /** Command used by ACP stdio backends. */
+  acpCommand?: string;
+  /** Arguments passed to acpCommand. */
+  acpArgs?: string[];
+  /** Optional friendly name for logs/UI. */
+  acpName?: string;
+  /** Command used by native Codex app-server backends. */
+  codexCommand?: string;
+  /** Arguments passed to codexCommand. */
+  codexArgs?: string[];
+  /** Optional friendly name for logs/UI. */
+  codexName?: string;
+  /** Native capability policy for command-backed agents. */
+  nativeCapabilityPolicy?: Partial<NativeCapabilityPolicy>;
 }
 
 export interface BackendResolutionContext {
@@ -36,9 +52,7 @@ export interface BackendResolutionContext {
   provider: AgentProvider;
   authType?: LlmAuthType;
   resolvedModel: string;
-  capabilities: {
-    needsHttpPoolServer: boolean;
-  };
+  capabilities: AgentBackendCapabilities;
 }
 
 export interface BackendProviderOptions {
@@ -88,7 +102,7 @@ export interface DriverTestConnectionArgs extends DriverHostRuntimeArgs {
   apiKey: string;
   model: string;
   baseUrl?: string;
-  connection?: Pick<LlmConnection, 'providerType' | 'piAuthProvider' | 'customEndpoint'>;
+  connection?: Pick<LlmConnection, 'providerType' | 'agentId' | 'piAuthProvider' | 'customEndpoint' | 'acpCommand' | 'acpArgs' | 'codexCommand' | 'codexArgs'>;
   timeoutMs: number;
 }
 
@@ -119,5 +133,9 @@ export function getDefaultProviderType(provider: AgentProvider): LlmProviderType
       return 'anthropic';
     case 'pi':
       return 'pi';
+    case 'acp':
+      return 'acp';
+    case 'codex':
+      return 'codex';
   }
 }

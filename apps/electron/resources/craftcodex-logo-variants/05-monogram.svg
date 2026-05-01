@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+      <defs>
+        <linearGradient id="bg" x1="64" y1="64" x2="448" y2="448" gradientUnits="userSpaceOnUse">
+          <stop stop-color="#1E1B4B"/>
+          <stop offset=".54" stop-color="#111827"/>
+          <stop offset="1" stop-color="#0F766E"/>
+        </linearGradient>
+        <linearGradient id="mark" x1="116" y1="84" x2="408" y2="428" gradientUnits="userSpaceOnUse">
+          <stop stop-color="#FFFFFF"/>
+          <stop offset="1" stop-color="#CFFAFE"/>
+        </linearGradient>
+      </defs>
+      <rect x="42" y="42" width="428" height="428" rx="96" fill="url(#bg)"/>
+      <path d="M380 158C352 118 310 98 254 98c-98 0-170 70-170 158s72 158 170 158c58 0 104-22 136-66" fill="none" stroke="#34D399" stroke-width="24" stroke-linecap="round"/>
+      <g transform="translate(8 0)">
+    <g transform="translate(130 114) scale(2.2) translate(-452 -368)">
+      
+      <path d="M474.78218,393.8 L474.78218,368 L566.666667,368 L566.666667,393.8 L474.78218,393.8 Z M521.101,419.6 L521.102306,445.4 L452,445.4 L452,393.8 L566.666667,393.8 L566.666667,419.6 L521.101,419.6 Z M474.78218,497 L474.775667,471.2 L452,471.2 L452,445.4 L566.666667,445.4 L566.666667,497 L474.78218,497 Z" fill="url(#mark)" fill-rule="nonzero"/>
+    </g>
+  </g>
+    </svg>

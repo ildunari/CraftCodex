@@ -1,5 +1,5 @@
-import { RPC_CHANNELS, type LlmConnectionSetup } from '@craft-agent/shared/protocol'
-import { getLlmConnections, getLlmConnection, addLlmConnection, updateLlmConnection, deleteLlmConnection, getDefaultLlmConnection, setDefaultLlmConnection, touchLlmConnection, isCompatProvider, isAnthropicProvider, getDefaultModelsForConnection, getDefaultModelForConnection, type LlmConnection, type LlmConnectionWithStatus, toBedrockNativeId } from '@craft-agent/shared/config'
+import { RPC_CHANNELS, type AgentCatalogActionResult, type AgentCatalogStatus, type LlmConnectionSetup } from '@craft-agent/shared/protocol'
+import { getLlmConnections, getLlmConnection, addLlmConnection, updateLlmConnection, deleteLlmConnection, getDefaultLlmConnection, setDefaultLlmConnection, touchLlmConnection, isCompatProvider, isAnthropicProvider, getDefaultModelsForConnection, getDefaultModelForConnection, AGENT_CATALOG, createConnectionForAgent, getAgentCatalogEntry, DROID_FACTORY_API_KEY_URL, type AgentCatalogId, type LlmConnection, type LlmConnectionWithStatus, toBedrockNativeId } from '@craft-agent/shared/config'
 import { getCredentialManager } from '@craft-agent/shared/credentials'
 import { setSetupDeferred } from '@craft-agent/shared/config/storage'
 import {
@@ -8,15 +8,287 @@ import {
   validateStoredBackendConnection,
 } from '@craft-agent/shared/agent/backend'
 import { getModelRefreshService } from '@craft-agent/server-core/model-fetchers'
-import { parseTestConnectionError, createBuiltInConnection, validateModelList, piAuthProviderDisplayName, validateSetupTestInput, setupTestRequiresApiKey } from '@craft-agent/server-core/domain'
+import { parseTestConnectionError, createBuiltInConnection, validateModelList, piAuthProviderDisplayName, validateSetupTestInput, setupTestRequiresApiKey, droidShadowWarning, isLegacyDroidBridge, loadFactoryDroidModelConfig, mergeDroidModels, normalizeAgentReadinessError, selectPreferredCommand, type CommandCandidate } from '@craft-agent/server-core/domain'
 import { getWorkspaceOrThrow, buildBackendHostRuntimeContext } from '@craft-agent/server-core/handlers'
 import { pushTyped, type RpcServer } from '@craft-agent/server-core/transport'
 import type { HandlerDeps } from '../handler-deps'
 import { randomUUID } from 'node:crypto'
 import { CLIENT_OPEN_EXTERNAL } from '@craft-agent/server-core/transport'
+import { spawn } from 'node:child_process'
 
 // Local OAuth state
 let copilotOAuthAbort: AbortController | null = null
+
+function runCommandProbe(command: string, args: string[], acceptAnyExit: boolean, timeoutMs = 3000): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false
+    const child = spawn(command, args, { stdio: 'ignore' })
+    const finish = (exists: boolean) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(exists)
+    }
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      finish(false)
+    }, timeoutMs)
+    child.once('error', () => finish(false))
+    child.once('exit', (code) => finish(acceptAnyExit || code === 0))
+  })
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), timeoutMs)
+    promise
+      .then(value => {
+        clearTimeout(timer)
+        resolve(value)
+      })
+      .catch(error => {
+        clearTimeout(timer)
+        reject(error)
+      })
+  })
+}
+
+function runCommandForOutput(command: string, args: string[], timeoutMs = 3000): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    let settled = false
+    let stdout = ''
+    let stderr = ''
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    const finish = (ok: boolean) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve({ ok, stdout, stderr })
+    }
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      finish(false)
+    }, timeoutMs)
+    child.stdout?.on('data', data => { stdout += data.toString() })
+    child.stderr?.on('data', data => { stderr += data.toString() })
+    child.once('error', () => finish(false))
+    child.once('exit', code => finish(code === 0))
+  })
+}
+
+function commandExists(command: string, timeoutMs = 3000): Promise<boolean> {
+  return runCommandProbe(command, ['--version'], true, timeoutMs)
+}
+
+async function resolveCommandPath(command: string): Promise<string | undefined> {
+  const result = await runCommandForOutput('/bin/bash', ['-lc', `command -v ${JSON.stringify(command)}`], 1000)
+  return result.ok ? result.stdout.trim().split('\n')[0] : undefined
+}
+
+async function inspectCommandCandidate(command: string): Promise<CommandCandidate> {
+  const path = command.includes('/') ? command : await resolveCommandPath(command)
+  const target = path || command
+  const result = await runCommandForOutput(target, ['--version'], 3000)
+  const version = (result.stdout || result.stderr).trim().split(/\s+/).find(part => /\d+\.\d+/.test(part))
+  return {
+    command,
+    path,
+    version,
+    exists: result.ok || !!version,
+  }
+}
+
+async function resolvePreferredAgentCommand(entry: NonNullable<ReturnType<typeof getAgentCatalogEntry>>): Promise<string | undefined> {
+  if (!entry.preferredCommandCandidates?.length) return entry.defaultCommand
+  const candidates = await Promise.all(entry.preferredCommandCandidates.map(inspectCommandCandidate))
+  return selectPreferredCommand(candidates)?.path ?? entry.defaultCommand
+}
+
+async function createResolvedConnectionForAgent(entry: NonNullable<ReturnType<typeof getAgentCatalogEntry>>): Promise<LlmConnection> {
+  const defaults = createConnectionForAgent(entry)
+  if (entry.providerType === 'acp') {
+    defaults.acpCommand = await resolvePreferredAgentCommand(entry)
+    defaults.acpArgs = entry.defaultArgs
+  }
+  if (entry.id === 'droid') {
+    const localConfig = loadFactoryDroidModelConfig()
+    defaults.models = mergeDroidModels(defaults.models, localConfig.models)
+    if (localConfig.defaultModel && defaults.models.some(model => (typeof model === 'string' ? model : model.id) === localConfig.defaultModel)) {
+      defaults.defaultModel = localConfig.defaultModel
+    }
+  }
+  return defaults
+}
+
+async function resolveDroidWarning(entry: NonNullable<ReturnType<typeof getAgentCatalogEntry>>): Promise<string | undefined> {
+  if (entry.id !== 'droid') return undefined
+  const active = await inspectCommandCandidate('droid')
+  const candidates = await Promise.all((entry.preferredCommandCandidates ?? ['droid']).map(inspectCommandCandidate))
+  const preferred = selectPreferredCommand(candidates)
+  return droidShadowWarning(active, preferred)
+}
+
+function isConnectionCommandMissing(connection: LlmConnection): Promise<boolean> {
+  const command = connection.providerType === 'acp'
+    ? connection.acpCommand
+    : connection.providerType === 'codex'
+      ? connection.codexCommand
+      : undefined
+  return command ? commandExists(command).then(exists => !exists) : Promise.resolve(false)
+}
+
+function modelIds(models: LlmConnection['models'] | undefined): string[] {
+  return (models ?? []).map(model => typeof model === 'string' ? model : model.id)
+}
+
+function syncDroidByokModels(connection: LlmConnection): LlmConnection {
+  if (inferCuratedAgentId(connection) !== 'droid') return connection
+
+  const localConfig = loadFactoryDroidModelConfig()
+  if (localConfig.models.length === 0 && !localConfig.defaultModel) return connection
+
+  const mergedModels = mergeDroidModels(connection.models, localConfig.models)
+  const nextDefaultModel = localConfig.defaultModel
+    && mergedModels.some(model => (typeof model === 'string' ? model : model.id) === localConfig.defaultModel)
+    ? localConfig.defaultModel
+    : connection.defaultModel
+  const currentIds = modelIds(connection.models)
+  const nextIds = modelIds(mergedModels)
+  const changed = currentIds.length !== nextIds.length
+    || currentIds.some((id, index) => id !== nextIds[index])
+    || nextDefaultModel !== connection.defaultModel
+
+  if (changed) {
+    updateLlmConnection(connection.slug, {
+      models: mergedModels,
+      defaultModel: nextDefaultModel,
+    })
+    return {
+      ...connection,
+      models: mergedModels,
+      defaultModel: nextDefaultModel,
+    }
+  }
+
+  return connection
+}
+
+function inferCuratedAgentId(conn: LlmConnection): AgentCatalogId | null {
+  if (conn.agentId) return conn.agentId
+  if (conn.providerType === 'codex') return 'codex'
+  if (conn.providerType !== 'acp') return null
+  const command = (conn.acpCommand || '').toLowerCase()
+  const args = (conn.acpArgs || []).join(' ').toLowerCase()
+  if (command.includes('hermes') || args.includes('hermes')) return 'hermes'
+  if (command.includes('droid') || args.includes('droid')) return 'droid'
+  const name = conn.name.toLowerCase()
+  if (name.includes('hermes')) return 'hermes'
+  if (name.includes('droid')) return 'droid'
+  return null
+}
+
+async function resolveAgentCatalogStatus(entryId: AgentCatalogId, connections = getLlmConnections()): Promise<AgentCatalogStatus> {
+  const entry = getAgentCatalogEntry(entryId)
+  if (!entry) {
+    throw new Error(`Unknown agent: ${entryId}`)
+  }
+  const connection = connections.find(c => inferCuratedAgentId(c) === entry.id)
+    ?? connections.find(c => c.slug === entry.defaultSlug)
+  const commandChecks = await Promise.all(entry.requiredCommands.map(async command => ({
+    command,
+    exists: await commandExists(command),
+  })))
+  const missingCommands = commandChecks.filter(check => !check.exists).map(check => check.command)
+  const installed = missingCommands.length === 0
+  const failedProbe = installed
+    ? (await Promise.all((entry.commandProbes ?? []).map(async probe => ({
+        label: probe.label ?? `${probe.command} ${(probe.args ?? []).join(' ')}`.trim(),
+        ok: await runCommandProbe(probe.command, probe.args ?? ['--version'], true),
+      })))).find(probe => !probe.ok)
+    : undefined
+  const configured = !!connection
+  const droidWarning = installed ? await resolveDroidWarning(entry) : undefined
+  const legacyDroidBridgeMissing = connection && isLegacyDroidBridge(connection)
+    ? await isConnectionCommandMissing(connection)
+    : false
+  let status: AgentCatalogStatus['status']
+  let message: string | undefined
+
+  if (!installed) {
+    status = 'not_installed'
+    message = missingCommands.length === 1
+      ? `${missingCommands[0]} is not installed or not on PATH`
+      : `Missing required commands: ${missingCommands.join(', ')}`
+  } else if (legacyDroidBridgeMissing) {
+    status = 'needs_setup'
+    message = 'Droid is configured through the optional agent-proxy bridge, but agent-proxy is not available. Re-enable Droid to switch to direct ACP.'
+  } else if (failedProbe) {
+    status = 'broken'
+    message = `${failedProbe.label} is installed but did not pass its readiness check.`
+  } else if (!configured) {
+    status = 'needs_setup'
+    message = droidWarning || `${entry.name} is installed and can be enabled.`
+  } else {
+    status = 'ready'
+    message = droidWarning || `${entry.name} is enabled.`
+  }
+
+  return {
+    ...entry,
+    status,
+    connectionSlug: connection?.slug,
+    installed,
+    configured,
+    ready: status === 'ready',
+    message,
+  }
+}
+
+async function resolveAgentCatalogStatusSafe(
+  entry: NonNullable<ReturnType<typeof getAgentCatalogEntry>>,
+  connections: LlmConnection[],
+): Promise<AgentCatalogStatus> {
+  try {
+    return await withTimeout(
+      resolveAgentCatalogStatus(entry.id, connections),
+      10_000,
+      `${entry.name} readiness check timed out.`,
+    )
+  } catch (error) {
+    return {
+      ...entry,
+      status: 'broken',
+      installed: false,
+      configured: connections.some(c => inferCuratedAgentId(c) === entry.id || c.slug === entry.defaultSlug),
+      ready: false,
+      message: error instanceof Error ? error.message : String(error),
+    }
+  }
+}
+
+async function resolveCommandBackedConnectionStatus(conn: LlmConnection): Promise<Pick<LlmConnectionWithStatus, 'isAuthenticated' | 'authError' | 'agentStatus'>> {
+  const agentId = inferCuratedAgentId(conn)
+  if (!agentId) {
+    if (conn.providerType === 'acp') {
+      return {
+        isAuthenticated: false,
+        authError: 'This ACP connection is legacy. Add Droid or Hermes from Agents to use a curated first-party integration.',
+        agentStatus: 'needs_setup',
+      }
+    }
+    return { isAuthenticated: conn.authType === 'none', agentStatus: conn.authType === 'none' ? 'ready' : undefined }
+  }
+  const entry = getAgentCatalogEntry(agentId)
+  if (!entry) {
+    return { isAuthenticated: false, authError: `Unknown agent "${agentId}"`, agentStatus: 'broken' }
+  }
+  const status = await resolveAgentCatalogStatus(entry.id)
+  return {
+    isAuthenticated: status.ready,
+    authError: status.ready ? undefined : status.message,
+    agentStatus: status.status,
+  }
+}
 
 export const HANDLED_CHANNELS = [
   RPC_CHANNELS.llmConnections.LIST,
@@ -29,6 +301,9 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.llmConnections.SET_DEFAULT,
   RPC_CHANNELS.llmConnections.SET_WORKSPACE_DEFAULT,
   RPC_CHANNELS.llmConnections.REFRESH_MODELS,
+  RPC_CHANNELS.llmConnections.LIST_AGENT_CATALOG,
+  RPC_CHANNELS.llmConnections.ENABLE_AGENT,
+  RPC_CHANNELS.llmConnections.OPEN_AGENT_SETUP,
   RPC_CHANNELS.chatgpt.START_OAUTH,
   RPC_CHANNELS.chatgpt.COMPLETE_OAUTH,
   RPC_CHANNELS.chatgpt.CANCEL_OAUTH,
@@ -296,9 +571,9 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
   // Unified connection test — uses the agent factory to spawn a real agent subprocess
   // and validate credentials via runMiniCompletion(). Same code path as actual chat.
   server.handle(RPC_CHANNELS.settings.TEST_LLM_CONNECTION_SETUP, async (_ctx, params: import('@craft-agent/shared/protocol').TestLlmConnectionParams): Promise<import('@craft-agent/shared/protocol').TestLlmConnectionResult> => {
-    const { provider, apiKey, baseUrl, model, piAuthProvider, customEndpoint } = params
+    const { provider, apiKey, baseUrl, model, piAuthProvider, customEndpoint, acpCommand, acpArgs, codexCommand, codexArgs } = params
     const trimmedKey = apiKey?.trim() ?? ''
-    const allowEmptyApiKey = !setupTestRequiresApiKey(baseUrl)
+    const allowEmptyApiKey = provider === 'codex' || provider === 'acp' || !setupTestRequiresApiKey(baseUrl)
 
     if (!trimmedKey && !allowEmptyApiKey) {
       return { success: false, error: 'API key is required' }
@@ -309,7 +584,7 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
       return { success: false, error: setupValidation.error }
     }
 
-    const hint = resolveSetupTestConnectionHint({ provider, baseUrl, piAuthProvider, customEndpoint })
+    const hint = resolveSetupTestConnectionHint({ provider, baseUrl, piAuthProvider, customEndpoint, acpCommand, acpArgs, codexCommand, codexArgs })
     deps.platform.logger?.info(`[testLlmConnectionSetup] Testing: provider=${provider}${piAuthProvider ? ` piAuth=${piAuthProvider}` : ''}${baseUrl ? ` baseUrl=${baseUrl}` : ''} hasCustomEndpoint=${!!customEndpoint} hintProvider=${hint.providerType}`)
 
     try {
@@ -386,7 +661,16 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
     const credentialManager = getCredentialManager()
     const defaultSlug = getDefaultLlmConnection()
 
-    return Promise.all(connections.map(async (conn): Promise<LlmConnectionWithStatus> => {
+    return Promise.all(connections.map(async (rawConn): Promise<LlmConnectionWithStatus> => {
+      const conn = syncDroidByokModels(rawConn)
+      if (conn.agentId || conn.providerType === 'codex' || conn.providerType === 'acp') {
+        const status = await resolveCommandBackedConnectionStatus(conn)
+        return {
+          ...conn,
+          isDefault: conn.slug === defaultSlug,
+          ...status,
+        }
+      }
       // Check if credentials exist for this connection
       const hasCredentials = await credentialManager.hasLlmCredentials(conn.slug, conn.authType)
       return {
@@ -481,7 +765,12 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
       })
 
       if (!result.success) {
-        return { success: false, error: result.error }
+        const connection = getLlmConnection(slug)
+        const agentId = connection ? inferCuratedAgentId(connection) : null
+        const normalized = agentId && result.error
+          ? normalizeAgentReadinessError(agentId, result.error)
+          : null
+        return { success: false, error: normalized?.message ?? result.error }
       }
 
       touchLlmConnection(slug)
@@ -505,6 +794,16 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
   // Set global default LLM connection
   server.handle(RPC_CHANNELS.llmConnections.SET_DEFAULT, async (_ctx, slug: string): Promise<{ success: boolean; error?: string }> => {
     try {
+      const connection = getLlmConnection(slug)
+      if (!connection) {
+        return { success: false, error: 'Connection not found' }
+      }
+      if (connection.agentId || connection.providerType === 'codex' || connection.providerType === 'acp') {
+        const status = await resolveCommandBackedConnectionStatus(connection)
+        if (!status.isAuthenticated) {
+          return { success: false, error: status.authError || 'Agent is not ready' }
+        }
+      }
       const success = setDefaultLlmConnection(slug)
       if (success) {
         deps.platform.logger?.info(`Global default LLM connection set to: ${slug}`)
@@ -528,6 +827,12 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
         const connection = getLlmConnection(slug)
         if (!connection) {
           return { success: false, error: 'Connection not found' }
+        }
+        if (connection.agentId || connection.providerType === 'codex' || connection.providerType === 'acp') {
+          const status = await resolveCommandBackedConnectionStatus(connection)
+          if (!status.isAuthenticated) {
+            return { success: false, error: status.authError || 'Agent is not ready' }
+          }
         }
       }
 
@@ -568,6 +873,162 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
       const msg = error instanceof Error ? error.message : 'Unknown error'
       deps.platform.logger?.error(`Failed to refresh models for ${slug}: ${msg}`)
       return { success: false, error: msg }
+    }
+  })
+
+  server.handle(RPC_CHANNELS.llmConnections.LIST_AGENT_CATALOG, async (): Promise<AgentCatalogStatus[]> => {
+    const connections = getLlmConnections()
+    return Promise.all(
+      AGENT_CATALOG
+        .filter(entry => entry.showInAgentManager !== false)
+        .map(entry => resolveAgentCatalogStatusSafe(entry, connections))
+    )
+  })
+
+  server.handle(RPC_CHANNELS.llmConnections.ENABLE_AGENT, async (_ctx, agentId: AgentCatalogId): Promise<AgentCatalogActionResult> => {
+    try {
+      const entry = getAgentCatalogEntry(agentId)
+      if (!entry) {
+        return { success: false, error: `Unknown agent: ${agentId}` }
+      }
+
+      const status = await resolveAgentCatalogStatus(entry.id)
+      if (!status.installed) {
+        return { success: false, error: status.message || `${entry.name} is not installed` }
+      }
+
+      const defaults = await createResolvedConnectionForAgent(entry)
+      const existing = getLlmConnections().find(c => inferCuratedAgentId(c) === entry.id)
+        ?? getLlmConnection(entry.defaultSlug)
+      if (existing) {
+        const replaceLegacyDroidBridge = isLegacyDroidBridge(existing)
+        const success = updateLlmConnection(existing.slug, {
+          agentId: existing.agentId ?? defaults.agentId,
+          providerType: existing.providerType || defaults.providerType,
+          authType: existing.authType || defaults.authType,
+          modelSelectionMode: existing.modelSelectionMode || defaults.modelSelectionMode,
+          acpCommand: replaceLegacyDroidBridge ? defaults.acpCommand : existing.acpCommand ?? defaults.acpCommand,
+          acpArgs: replaceLegacyDroidBridge ? defaults.acpArgs : existing.acpArgs ?? defaults.acpArgs,
+          codexCommand: existing.codexCommand ?? defaults.codexCommand,
+          codexArgs: existing.codexArgs ?? defaults.codexArgs,
+          models: entry.id === 'droid' ? mergeDroidModels(existing.models, defaults.models ?? []) : existing.models?.length ? existing.models : defaults.models,
+          defaultModel: entry.id === 'droid' && defaults.defaultModel ? defaults.defaultModel : existing.defaultModel || defaults.defaultModel,
+          name: existing.name || entry.name,
+        })
+        return success
+          ? { success: true, connectionSlug: existing.slug, message: `${entry.name} is enabled.` }
+          : { success: false, error: `Failed to update ${entry.name}` }
+      }
+
+      const added = addLlmConnection(defaults)
+      if (!added) {
+        return { success: false, error: `Failed to add ${entry.name}` }
+      }
+
+      deps.platform.logger?.info(`Enabled curated agent: ${entry.id}`)
+      if (!getDefaultLlmConnection()) {
+        setDefaultLlmConnection(defaults.slug)
+      }
+      return { success: true, connectionSlug: defaults.slug, message: `${entry.name} is enabled.` }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+
+  server.handle(RPC_CHANNELS.llmConnections.OPEN_AGENT_SETUP, async (ctx, agentId: AgentCatalogId): Promise<AgentCatalogActionResult> => {
+    const entry = getAgentCatalogEntry(agentId)
+    if (!entry) {
+      return { success: false, error: `Unknown agent: ${agentId}` }
+    }
+    if (agentId === 'droid') {
+      try {
+        await server.invokeClient(ctx.clientId, CLIENT_OPEN_EXTERNAL, DROID_FACTORY_API_KEY_URL)
+      } catch (error) {
+        deps.platform.logger?.warn(`Failed to open Droid API key URL: ${error instanceof Error ? error.message : error}`)
+      }
+      return {
+        success: true,
+        message: 'Create a Factory API key, paste it into Droid setup, then re-check Droid.',
+      }
+    }
+    if (entry.setupUrl || entry.docsUrl) {
+      try {
+        await server.invokeClient(ctx.clientId, CLIENT_OPEN_EXTERNAL, entry.setupUrl || entry.docsUrl)
+        return { success: true, message: entry.setupCommand ? `After setup, run: ${entry.setupCommand}` : undefined }
+      } catch (error) {
+        deps.platform.logger?.warn(`Failed to open setup URL for ${agentId}: ${error instanceof Error ? error.message : error}`)
+      }
+    }
+    return {
+      success: true,
+      message: entry.setupCommand
+        ? `Run ${entry.setupCommand}, then re-check ${entry.name}.`
+        : `Install or configure ${entry.name}, then re-check.`,
+    }
+  })
+
+  server.handle(RPC_CHANNELS.llmConnections.SAVE_AGENT_API_KEY, async (_ctx, agentId: AgentCatalogId, apiKey: string): Promise<AgentCatalogActionResult> => {
+    try {
+      if (agentId !== 'droid') {
+        return { success: false, error: `API key setup is not supported for ${agentId}` }
+      }
+      const trimmed = apiKey.trim()
+      if (!trimmed) {
+        return { success: false, error: 'Enter a Factory API key.' }
+      }
+
+      const entry = getAgentCatalogEntry(agentId)
+      if (!entry) {
+        return { success: false, error: `Unknown agent: ${agentId}` }
+      }
+
+      const status = await resolveAgentCatalogStatus(entry.id)
+      if (!status.installed) {
+        return { success: false, error: status.message || `${entry.name} is not installed` }
+      }
+
+      const defaults = await createResolvedConnectionForAgent(entry)
+      const existing = getLlmConnections().find(c => inferCuratedAgentId(c) === entry.id)
+        ?? getLlmConnection(entry.defaultSlug)
+      const connectionSlug = existing?.slug ?? defaults.slug
+
+      if (existing) {
+        const replaceLegacyDroidBridge = isLegacyDroidBridge(existing)
+        const success = updateLlmConnection(existing.slug, {
+          agentId: existing.agentId ?? defaults.agentId,
+          providerType: existing.providerType || defaults.providerType,
+          authType: existing.authType || defaults.authType,
+          modelSelectionMode: existing.modelSelectionMode || defaults.modelSelectionMode,
+          acpCommand: replaceLegacyDroidBridge ? defaults.acpCommand : existing.acpCommand ?? defaults.acpCommand,
+          acpArgs: replaceLegacyDroidBridge ? defaults.acpArgs : existing.acpArgs ?? defaults.acpArgs,
+          models: mergeDroidModels(existing.models, defaults.models ?? []),
+          defaultModel: defaults.defaultModel || existing.defaultModel,
+          name: existing.name || entry.name,
+        })
+        if (!success) {
+          return { success: false, error: `Failed to update ${entry.name}` }
+        }
+      } else {
+        const added = addLlmConnection(defaults)
+        if (!added) {
+          return { success: false, error: `Failed to add ${entry.name}` }
+        }
+      }
+
+      const credentialManager = getCredentialManager()
+      await credentialManager.setLlmApiKey(connectionSlug, trimmed)
+      if (!getDefaultLlmConnection()) {
+        setDefaultLlmConnection(connectionSlug)
+      }
+      await sessionManager.reinitializeAuth(connectionSlug)
+
+      return {
+        success: true,
+        connectionSlug,
+        message: 'Droid Factory API key saved. Droid will use it when Craft launches Droid.',
+      }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) }
     }
   })
 

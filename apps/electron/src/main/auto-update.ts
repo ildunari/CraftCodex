@@ -2,8 +2,10 @@
  * Auto-update module using electron-updater
  *
  * Handles checking for updates, downloading, and installing via the standard
- * electron-updater library. Updates are served from https://agents.craft.do/electron/latest
- * using the generic provider (YAML manifests + binaries on R2/S3).
+ * electron-updater library. Official Craft Agents builds are served from
+ * https://agents.craft.do/electron/latest using the generic provider
+ * (YAML manifests + binaries on R2/S3). CraftCodex builds use a GitHub Release
+ * feed on Kosta's fork unless CRAFTCODEX_UPDATE_FEED_URL overrides it.
  *
  * Platform behavior:
  * - macOS: Downloads zip, extracts and swaps app bundle atomically
@@ -28,6 +30,7 @@ import {
 import { readJsonFileSync } from '@craft-agent/shared/utils/files'
 import { RPC_CHANNELS, type UpdateInfo } from '../shared/types'
 import type { EventSink } from '@craft-agent/server-core/transport'
+import { resolveAutoUpdateFeedDecision } from './auto-update-config'
 
 // Platform detection
 const PLATFORM = platform()
@@ -66,6 +69,7 @@ let eventSink: EventSink | null = null
 
 // Flag to indicate update is in progress — used to prevent force exit during quitAndInstall
 let __isUpdating = false
+const feedDecision = resolveAutoUpdateFeedDecision({ appName: app.getName() })
 
 /**
  * Check if an update installation is in progress.
@@ -123,6 +127,13 @@ autoUpdater.logger = {
   warn: (msg: unknown) => mainLog.warn('[electron-updater]', msg),
   error: (msg: unknown) => mainLog.error('[electron-updater]', msg),
   debug: (msg: unknown) => mainLog.info('[electron-updater:debug]', msg),
+}
+
+if (feedDecision.enabled && feedDecision.feedUrl) {
+  autoUpdater.setFeedURL({ provider: 'generic', url: feedDecision.feedUrl })
+  mainLog.info('[auto-update] Feed configured:', feedDecision.feedUrl)
+} else {
+  mainLog.info('[auto-update] Feed disabled:', feedDecision.reason)
 }
 
 // ─── Event handlers ───────────────────────────────────────────────────────────
@@ -314,6 +325,19 @@ function checkForExistingDownload(): { exists: boolean; version?: string } {
  * @param options.autoDownload - If false, only checks without downloading (for manual "Check Now")
  */
 export async function checkForUpdates(options: CheckOptions = {}): Promise<UpdateInfo> {
+  if (!feedDecision.enabled) {
+    updateInfo = {
+      ...updateInfo,
+      available: false,
+      latestVersion: null,
+      downloadState: 'error',
+      downloadProgress: 0,
+      error: feedDecision.reason ?? 'Auto-updates are not configured for this build.',
+    }
+    broadcastUpdateInfo()
+    return getUpdateInfo()
+  }
+
   const { autoDownload = true } = options
 
   // Temporarily override autoDownload for this check if needed
@@ -413,6 +437,11 @@ export interface UpdateOnLaunchResult {
  * - Auto-downloads if update available
  */
 export async function checkForUpdatesOnLaunch(): Promise<UpdateOnLaunchResult> {
+  if (!feedDecision.enabled) {
+    mainLog.info('[auto-update] Skipping launch check:', feedDecision.reason)
+    return { action: 'skipped', reason: feedDecision.reason }
+  }
+
   mainLog.info('[auto-update] Checking for updates on launch...')
 
   const info = await checkForUpdates({ autoDownload: true })

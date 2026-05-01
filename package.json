@@ -89,7 +89,9 @@
     "release": "bun run scripts/release.ts",
     "check-version": "bun run scripts/check-version.ts",
     "oss:sync": "bun run scripts/oss-sync.ts",
-    "prepare": "husky"
+    "prepare": "husky",
+    "craftcodex:compose-release": "bash scripts/craftcodex-compose-release.sh",
+    "craftcodex:check-upstream": "bun scripts/craftcodex-check-upstream-update.ts"
   },
   "devDependencies": {
     "@aws-sdk/client-s3": "^3.947.0",

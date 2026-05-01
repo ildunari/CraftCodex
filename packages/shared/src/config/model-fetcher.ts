@@ -9,6 +9,8 @@
  *
  * Compat providers (anthropic_compat, pi_compat) are excluded —
  * they point to arbitrary endpoints where users configure models manually.
+ * ACP providers are excluded because model discovery depends on the
+ * configured command/gateway rather than a shared provider API.
  */
 
 import type { ModelDefinition } from './models';
@@ -29,6 +31,7 @@ import type { LlmProviderType, LlmConnection } from './llm-connections';
 export type FetchableProvider = Exclude<LlmProviderType,
   | 'anthropic_compat'
   | 'pi_compat'
+  | 'acp'
 >;
 
 /**

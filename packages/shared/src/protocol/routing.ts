@@ -187,6 +187,13 @@ export const LOCAL_ONLY_CHANNELS = new Set<string>([
   RPC_CHANNELS.settings.GET_SERVER_CONFIG,
   RPC_CHANNELS.settings.SET_SERVER_CONFIG,
   RPC_CHANNELS.settings.GET_SERVER_STATUS,
+
+  // local agents — these inspect and configure CLIs on this Mac, so they must
+  // not be proxied to an older or remote workspace server.
+  RPC_CHANNELS.llmConnections.LIST_AGENT_CATALOG,
+  RPC_CHANNELS.llmConnections.ENABLE_AGENT,
+  RPC_CHANNELS.llmConnections.OPEN_AGENT_SETUP,
+  RPC_CHANNELS.llmConnections.SAVE_AGENT_API_KEY,
 ])
 
 // ---------------------------------------------------------------------------
@@ -294,6 +301,12 @@ export const REMOTE_ELIGIBLE_CHANNELS = new Set<string>([
   RPC_CHANNELS.settings.TEST_LLM_CONNECTION_SETUP,
   RPC_CHANNELS.settings.GET_DEFAULT_THINKING_LEVEL,
   RPC_CHANNELS.settings.SET_DEFAULT_THINKING_LEVEL,
+
+  // caching — workspace/server-side agent runtime defaults
+  RPC_CHANNELS.caching.GET_EXTENDED_PROMPT_CACHE,
+  RPC_CHANNELS.caching.SET_EXTENDED_PROMPT_CACHE,
+  RPC_CHANNELS.caching.GET_ENABLE_1M_CONTEXT,
+  RPC_CHANNELS.caching.SET_ENABLE_1M_CONTEXT,
 
   // pi — provider config on workspace server
   RPC_CHANNELS.pi.GET_API_KEY_PROVIDERS,

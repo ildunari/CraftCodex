@@ -177,6 +177,10 @@ export const RPC_CHANNELS = {
     SET_DEFAULT: 'LLM_Connection:setDefault',
     SET_WORKSPACE_DEFAULT: 'LLM_Connection:setWorkspaceDefault',
     REFRESH_MODELS: 'LLM_Connection:refreshModels',
+    LIST_AGENT_CATALOG: 'LLM_Connection:listAgentCatalog',
+    ENABLE_AGENT: 'LLM_Connection:enableAgent',
+    OPEN_AGENT_SETUP: 'LLM_Connection:openAgentSetup',
+    SAVE_AGENT_API_KEY: 'LLM_Connection:saveAgentApiKey',
     CHANGED: 'LLM_Connection:changed',
   },
   chatgpt: {

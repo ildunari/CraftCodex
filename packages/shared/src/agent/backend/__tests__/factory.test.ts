@@ -9,6 +9,8 @@
  */
 import { describe, it, expect, beforeEach } from 'bun:test';
 import { join } from 'node:path';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import {
   detectProvider,
   createBackend,
@@ -22,14 +24,18 @@ import {
   providerTypeToAgentProvider,
   resolveSetupTestConnectionHint,
   createBackendFromConnection,
+  resolveModelForProvider,
   testBackendConnection,
   validateStoredBackendConnection,
+  BACKEND_CAPABILITIES,
 } from '../factory.ts';
 import type { BackendConfig } from '../types.ts';
 import type { Workspace, LlmConnection } from '../../../config/storage.ts';
 import type { SessionConfig as Session } from '../../../sessions/storage.ts';
 import { ClaudeAgent } from '../../claude-agent.ts';
 import { PiAgent } from '../../pi-agent.ts';
+import { AcpAgent } from '../../acp-agent.ts';
+import { CodexAgent } from '../../codex-agent.ts';
 import { isValidProviderAuthCombination } from '../../../config/llm-connections.ts';
 
 // Test helpers
@@ -62,6 +68,32 @@ function createTestConfig(overrides: Partial<BackendConfig> = {}): BackendConfig
     isHeadless: true, // Prevent config watchers from starting
     ...overrides,
   };
+}
+
+async function createFixtureCodexModelServer(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'craft-codex-factory-fixture-'));
+  const scriptPath = join(dir, 'fixture-codex.mjs');
+  await writeFile(scriptPath, `
+import readline from 'node:readline';
+
+const rl = readline.createInterface({ input: process.stdin });
+function send(value) {
+  process.stdout.write(JSON.stringify(value) + '\\n');
+}
+
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') {
+    send({ id: msg.id, result: { userAgent: 'fixture', codexHome: '/tmp/codex' } });
+    return;
+  }
+  if (msg.method === 'initialized') return;
+  if (msg.method === 'model/list') {
+    send({ id: msg.id, result: { models: [{ id: 'gpt-5.5', name: 'GPT-5.5', contextWindow: 272000 }] } });
+  }
+});
+`, 'utf8');
+  return scriptPath;
 }
 
 describe('detectProvider', () => {
@@ -102,6 +134,36 @@ describe('createBackend / createAgent', () => {
     });
   });
 
+  describe('ACP provider', () => {
+    it('should create AcpAgent for acp provider', () => {
+      const config = createTestConfig({
+        provider: 'acp',
+        authType: 'none',
+        runtime: { acpCommand: 'fixture-acp', acpArgs: [] },
+      });
+      const agent = createBackend(config);
+
+      expect(agent).toBeInstanceOf(AcpAgent);
+      agent.destroy();
+    });
+  });
+
+  describe('Codex provider', () => {
+    it('should create CodexAgent for codex provider', () => {
+      const config = createTestConfig({
+        provider: 'codex',
+        providerType: 'codex',
+        authType: 'none',
+        model: 'gpt-5.5',
+        runtime: { codexCommand: 'fixture-codex', codexArgs: [] },
+      });
+      const agent = createBackend(config);
+
+      expect(agent).toBeInstanceOf(CodexAgent);
+      agent.destroy();
+    });
+  });
+
   describe('Unknown provider', () => {
     it('should throw for unknown provider', () => {
       const config = createTestConfig({ provider: 'unknown' as any });
@@ -118,12 +180,14 @@ describe('createBackend / createAgent', () => {
 });
 
 describe('getAvailableProviders', () => {
-  it('should return anthropic and pi', () => {
+  it('should return anthropic, pi, acp, and codex', () => {
     const providers = getAvailableProviders();
 
     expect(providers).toContain('anthropic');
     expect(providers).toContain('pi');
-    expect(providers).toHaveLength(2);
+    expect(providers).toContain('acp');
+    expect(providers).toContain('codex');
+    expect(providers).toHaveLength(4);
   });
 });
 
@@ -136,8 +200,41 @@ describe('isProviderAvailable', () => {
     expect(isProviderAvailable('pi')).toBe(true);
   });
 
+  it('should return true for acp', () => {
+    expect(isProviderAvailable('acp')).toBe(true);
+  });
+
+  it('should return true for codex', () => {
+    expect(isProviderAvailable('codex')).toBe(true);
+  });
+
   it('should return false for unknown provider', () => {
     expect(isProviderAvailable('unknown' as any)).toBe(false);
+  });
+});
+
+describe('BACKEND_CAPABILITIES', () => {
+  it('marks Codex as a command-backed first-party tool/permission backend', () => {
+    expect(BACKEND_CAPABILITIES.codex).toMatchObject({
+      isCommandBacked: true,
+      supportsToolEvents: true,
+      supportsMcpToolEvents: true,
+      supportsPermissionForwarding: true,
+      supportsModelDiscovery: true,
+      supportsUsageUpdates: true,
+      supportsSteering: true,
+    });
+  });
+
+  it('keeps ACP generic but capable of forwarding basic tool and permission events', () => {
+    expect(BACKEND_CAPABILITIES.acp).toMatchObject({
+      isCommandBacked: true,
+      supportsToolEvents: true,
+      supportsMcpToolEvents: true,
+      supportsPermissionForwarding: true,
+      supportsModelDiscovery: false,
+      supportsSteering: false,
+    });
   });
 });
 
@@ -201,6 +298,18 @@ describe('providerTypeToAgentProvider', () => {
       expect(providerTypeToAgentProvider('pi_compat')).toBe('pi');
     });
   });
+
+  describe('ACP providers', () => {
+    it('should map acp to acp', () => {
+      expect(providerTypeToAgentProvider('acp')).toBe('acp');
+    });
+  });
+
+  describe('Codex providers', () => {
+    it('should map codex to codex', () => {
+      expect(providerTypeToAgentProvider('codex')).toBe('codex');
+    });
+  });
 });
 
 // ============================================================
@@ -257,6 +366,30 @@ describe('isValidProviderAuthCombination', () => {
 
     it('should accept none auth (for local models like Ollama)', () => {
       expect(isValidProviderAuthCombination('pi_compat', 'none')).toBe(true);
+    });
+  });
+
+  describe('ACP provider', () => {
+    it('should accept none auth', () => {
+      expect(isValidProviderAuthCombination('acp', 'none')).toBe(true);
+    });
+
+    it('should reject api_key auth until credential injection is implemented', () => {
+      expect(isValidProviderAuthCombination('acp', 'api_key')).toBe(false);
+    });
+
+    it('should reject endpoint auth', () => {
+      expect(isValidProviderAuthCombination('acp', 'api_key_with_endpoint')).toBe(false);
+    });
+  });
+
+  describe('Codex provider', () => {
+    it('should accept none auth', () => {
+      expect(isValidProviderAuthCombination('codex', 'none')).toBe(true);
+    });
+
+    it('should reject api_key auth', () => {
+      expect(isValidProviderAuthCombination('codex', 'api_key')).toBe(false);
     });
   });
 
@@ -337,6 +470,18 @@ describe('phase4 backend abstraction APIs', () => {
       baseUrl: 'https://my-anthropic-proxy.internal/v1',
       customEndpoint: { api: 'anthropic-messages' },
     })).toEqual({ providerType: 'pi_compat', piAuthProvider: 'anthropic', customEndpoint: { api: 'anthropic-messages' } });
+
+    expect(resolveSetupTestConnectionHint({
+      provider: 'acp',
+      acpCommand: 'hermes',
+      acpArgs: ['acp', '--accept-hooks'],
+    })).toEqual({ providerType: 'acp', acpCommand: 'hermes', acpArgs: ['acp', '--accept-hooks'] });
+
+    expect(resolveSetupTestConnectionHint({
+      provider: 'codex',
+      codexCommand: '/opt/bin/codex',
+      codexArgs: ['app-server', '--listen', 'stdio://'],
+    })).toEqual({ providerType: 'codex', codexCommand: '/opt/bin/codex', codexArgs: ['app-server', '--listen', 'stdio://'] });
   });
 
   it('fetchBackendModels dispatches for pi provider', async () => {
@@ -406,6 +551,27 @@ describe('phase4 backend abstraction APIs', () => {
     expect(result.success).toBe(false);
     expect(result.error).toBe('API key is required');
   });
+
+  it('testBackendConnection allows keyless Codex connections and uses the Codex driver path', async () => {
+    const scriptPath = await createFixtureCodexModelServer();
+
+    const result = await testBackendConnection({
+      provider: 'codex',
+      apiKey: '   ',
+      model: 'gpt-5.5',
+      hostRuntime: {
+        appRootPath: process.cwd(),
+        isPackaged: false,
+      },
+      connection: {
+        providerType: 'codex',
+        codexCommand: process.execPath,
+        codexArgs: [scriptPath],
+      },
+    });
+
+    expect(result.success).toBe(true);
+  });
 });
 
 describe('ClaudeAgent model switching', () => {
@@ -417,5 +583,36 @@ describe('ClaudeAgent model switching', () => {
     agent.setModel('claude-sonnet-4-6');
 
     expect(agent.getModel()).toBe('claude-sonnet-4-6');
+  });
+});
+
+describe('resolveModelForProvider', () => {
+  it('falls back when a stored model is not available on the selected Codex agent', () => {
+    const connection: LlmConnection = {
+      slug: 'codex-native',
+      name: 'Codex Native',
+      providerType: 'codex',
+      authType: 'none',
+      models: ['gpt-5.5'],
+      defaultModel: 'gpt-5.5',
+      createdAt: Date.now(),
+    };
+
+    expect(resolveModelForProvider('codex', 'claude-sonnet-4-6', connection)).toBe('gpt-5.5');
+  });
+
+  it('keeps an ACP model only when the connection declares it', () => {
+    const connection: LlmConnection = {
+      slug: 'acp-droid',
+      name: 'Droid ACP',
+      providerType: 'acp',
+      authType: 'none',
+      models: ['droid-pro'],
+      defaultModel: 'droid-pro',
+      createdAt: Date.now(),
+    };
+
+    expect(resolveModelForProvider('acp', 'droid-pro', connection)).toBe('droid-pro');
+    expect(resolveModelForProvider('acp', 'gpt-5.5', connection)).toBe('droid-pro');
   });
 });

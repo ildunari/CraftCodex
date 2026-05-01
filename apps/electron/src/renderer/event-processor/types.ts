@@ -5,7 +5,7 @@
  * All agent events flow through a single pure function for consistent state transitions.
  */
 
-import type { Session, Message, PermissionRequest, CredentialRequest, TypedError, PermissionMode, SessionStatus, AuthRequest, ToolDisplayMeta } from '../../shared/types'
+import type { Session, Message, PermissionRequest, CredentialRequest, TypedError, PermissionMode, SessionStatus, AuthRequest, ToolDisplayMeta, AgentBackendCapabilities, NativeCapabilitySyncManifest } from '../../shared/types'
 
 /**
  * Streaming state for a session - replaces streamingTextRef
@@ -320,6 +320,8 @@ export interface LLMConnectionChangedEvent {
   sessionId: string
   connectionSlug: string
   supportsBranching?: boolean
+  backendCapabilities?: AgentBackendCapabilities
+  nativeCapabilityManifest?: NativeCapabilitySyncManifest
 }
 
 /**

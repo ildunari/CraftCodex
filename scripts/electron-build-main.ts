@@ -54,6 +54,9 @@ function getBuildDefines(): string[] {
     "MICROSOFT_OAUTH_CLIENT_SECRET",
     "SENTRY_ELECTRON_INGEST_URL",
     "CRAFT_DEV_RUNTIME",
+    "CRAFTCODEX_UPDATE_FEED_URL",
+    "CRAFT_UPDATE_FEED_URL",
+    "CRAFT_ALLOW_OFFICIAL_UPDATE_FEED",
   ];
 
   return definedVars.map((varName) => {

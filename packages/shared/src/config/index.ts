@@ -1,5 +1,7 @@
 export * from './types.ts';
 export * from './llm-connections.ts';
+export * from './agent-catalog.ts';
+export * from './agent-auth.ts';
 export * from './llm-validation.ts';
 export * from './models.ts';
 export * from './models-pi.ts';

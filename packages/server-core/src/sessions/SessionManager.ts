@@ -14,11 +14,27 @@ import {
   createBackendFromResolvedContext,
   cleanupSourceRuntimeArtifacts,
   providerTypeToAgentProvider,
+  resolveModelForProvider,
   type AgentBackend,
   type BackendHostRuntimeContext,
   type PostInitResult,
+  type AgentBackendCapabilities,
+  buildCraftCapabilityInventory,
+  redactNativeCapabilityManifest,
 } from '@craft-agent/shared/agent/backend'
-import { getLlmConnection, getLlmConnections, getDefaultLlmConnection, getDefaultThinkingLevel, resetManagedAnthropicAuthEnvVars } from '@craft-agent/shared/config'
+import {
+  getLlmConnection,
+  getLlmConnections,
+  getDefaultLlmConnection,
+  getDefaultThinkingLevel,
+  resetManagedAnthropicAuthEnvVars,
+  getAvailableModelsForConnection,
+  getModelIdFromEntry,
+  isModelAvailableForConnection,
+  DROID_FACTORY_API_KEY_ENV,
+  isDroidAgentConnection,
+  type LlmConnection,
+} from '@craft-agent/shared/config'
 import { PrivilegedExecutionBroker } from '@craft-agent/server-core/services'
 import { isValidWorkingDirectory } from '../utils/path-validation'
 import { InitGate } from '@craft-agent/server-core/domain'
@@ -85,6 +101,17 @@ import { getToolIconsDir, getMiniModel } from '@craft-agent/shared/config'
 import { getDefaultSummarizationModel } from '@craft-agent/shared/config/models'
 import type { SummarizeCallback } from '@craft-agent/shared/sources'
 import { type ThinkingLevel, DEFAULT_THINKING_LEVEL, normalizeThinkingLevel } from '@craft-agent/shared/agent/thinking-levels'
+
+async function applyAgentCredentialEnvOverrides(
+  connection: LlmConnection | null | undefined,
+  envOverrides: Record<string, string>,
+): Promise<void> {
+  if (!connection || !isDroidAgentConnection(connection)) return
+  const apiKey = await getCredentialManager().getLlmApiKey(connection.slug)
+  if (apiKey) {
+    envOverrides[DROID_FACTORY_API_KEY_ENV] = apiKey
+  }
+}
 import { evaluateAutoLabels } from '@craft-agent/shared/labels/auto'
 import { listLabels } from '@craft-agent/shared/labels/storage'
 import { extractLabelId } from '@craft-agent/shared/labels'
@@ -968,7 +995,7 @@ export function createManagedSession(
 
 /**
  * Resolve supportsBranching for a managed session.
- * Prefers the live agent instance; falls back to true for all backends.
+ * Prefers the live agent instance, then falls back to provider capabilities.
  */
 function resolveSupportsBranching(managed: ManagedSession): boolean {
   // If agent is live, use its instance property (authoritative)
@@ -976,7 +1003,38 @@ function resolveSupportsBranching(managed: ManagedSession): boolean {
     return managed.agent.supportsBranching
   }
 
-  return true // default: branching enabled for all backends
+  const wsConfig = loadWorkspaceConfig(managed.workspace.rootPath)
+  return resolveBackendContext({
+    sessionConnectionSlug: managed.llmConnection,
+    workspaceDefaultConnectionSlug: wsConfig?.defaults?.defaultLlmConnection,
+    managedModel: managed.model,
+  }).capabilities.supportsBranching
+}
+
+/**
+ * Resolve full backend capabilities for a managed session.
+ * Prefers live instance facts for fields that can change after construction.
+ */
+function resolveSessionBackendCapabilities(managed: ManagedSession): AgentBackendCapabilities {
+  const wsConfig = loadWorkspaceConfig(managed.workspace.rootPath)
+  const capabilities = {
+    ...resolveBackendContext({
+      sessionConnectionSlug: managed.llmConnection,
+      workspaceDefaultConnectionSlug: wsConfig?.defaults?.defaultLlmConnection,
+      managedModel: managed.model,
+    }).capabilities,
+  }
+
+  if (managed.agent) {
+    capabilities.supportsBranching = managed.agent.supportsBranching
+  }
+
+  return capabilities
+}
+
+function resolveNativeCapabilityManifest(managed: ManagedSession) {
+  const manifest = managed.agent?.getNativeCapabilityManifest?.()
+  return manifest ? redactNativeCapabilityManifest(manifest) : undefined
 }
 
 const DEFAULT_TOKEN_USAGE = {
@@ -1004,6 +1062,8 @@ function managedToSession(m: ManagedSession, overrides?: Partial<Session>): Sess
     isProcessing: m.isProcessing,
     sessionFolderPath: getSessionStoragePath(m.workspace.rootPath, m.id),
     supportsBranching: resolveSupportsBranching(m),
+    backendCapabilities: resolveSessionBackendCapabilities(m),
+    nativeCapabilityManifest: resolveNativeCapabilityManifest(m),
     ...overrides,
   } as Session
 }
@@ -2235,6 +2295,16 @@ export class SessionManager implements ISessionManager {
         ?? (sourceBackendContext.provider === 'pi' ? 'pi' : 'anthropic')
       const sourcePiAuthProvider = sourceBackendContext.connection?.piAuthProvider
 
+      if (!sourceBackendContext.capabilities.supportsBranching || !targetBackendContext.capabilities.supportsBranching) {
+        sessionLog.warn('Branch validation failed: backend does not support branching', {
+          workspaceId,
+          branchFromSessionId: options.branchFromSessionId,
+          sourceProvider: sourceBackendContext.provider,
+          targetProvider: targetBackendContext.provider,
+        })
+        throw new Error('Branching is not supported by this agent backend yet.')
+      }
+
       const providerMismatch = sourceBackendContext.provider !== targetBackendContext.provider
       const providerTypeMismatch = sourceProviderType !== targetProviderType
       const piAuthProviderMismatch =
@@ -2544,6 +2614,8 @@ export class SessionManager implements ISessionManager {
           sessionId: managed.id,
           connectionSlug: connection.slug,
           supportsBranching: resolveSupportsBranching(managed),
+          backendCapabilities: resolveSessionBackendCapabilities(managed),
+          nativeCapabilityManifest: resolveNativeCapabilityManifest(managed),
         }, managed.workspace.id)
       }
 
@@ -2577,6 +2649,10 @@ export class SessionManager implements ISessionManager {
 
       // Build server configs for enabled sources
       const { mcpServers, apiServers } = await buildServersFromSources(enabledSources, sessionPath, managed.tokenRefreshManager)
+      const craftCapabilityInventory = buildCraftCapabilityInventory({
+        enabledSourceSlugs: enabledSlugs,
+        mcpServers,
+      })
 
       // Create centralized MCP client pool (all backends use it)
       managed.mcpPool = new McpClientPool({ debug: (msg) => sessionLog.debug(msg), workspaceRootPath: managed.workspace.rootPath, sessionPath })
@@ -2598,6 +2674,7 @@ export class SessionManager implements ISessionManager {
         // use the correct model for summarization (instead of hardcoded Haiku)
         ...(miniModel ? { ANTHROPIC_DEFAULT_HAIKU_MODEL: miniModel } : {}),
       }
+      await applyAgentCredentialEnvOverrides(backendContext.connection, envOverrides)
       managed.envOverrides = envOverrides
 
       // ============================================================
@@ -2763,6 +2840,7 @@ export class SessionManager implements ISessionManager {
           apiServers,
           enabledSlugs,
         },
+        craftCapabilityInventory,
         },
       }) as AgentInstance
 
@@ -3619,8 +3697,6 @@ export class SessionManager implements ISessionManager {
       throw new Error('Cannot change connection after session has started')
     }
 
-    // Validate connection exists
-    const { getLlmConnection } = await import('@craft-agent/shared/config/storage')
     const connection = getLlmConnection(connectionSlug)
     if (!connection) {
       sessionLog.warn(`setSessionConnection: connection "${connectionSlug}" not found`)
@@ -3628,6 +3704,17 @@ export class SessionManager implements ISessionManager {
     }
 
     managed.llmConnection = connectionSlug
+    const currentModel = managed.model
+    if (currentModel && !isModelAvailableForConnection(connection, currentModel)) {
+      const replacement = getAvailableModelsForConnection(connection)[0]
+      managed.model = connection.defaultModel || (replacement ? getModelIdFromEntry(replacement) : undefined)
+      if (managed.model) {
+        managed.agent?.setModel(managed.model)
+      }
+      sessionLog.info(
+        `setSessionConnection: cleared incompatible model "${currentModel}" for agent "${connectionSlug}"; replacement=${managed.model ?? '(none)'}`
+      )
+    }
     // Persist in-memory state directly to avoid race with pending queue writes
     this.persistSession(managed)
     await this.flushSession(managed.id)
@@ -3639,7 +3726,13 @@ export class SessionManager implements ISessionManager {
       sessionId,
       connectionSlug,
       supportsBranching: resolveSupportsBranching(managed),
+      backendCapabilities: resolveSessionBackendCapabilities(managed),
+      nativeCapabilityManifest: resolveNativeCapabilityManifest(managed),
     }, managed.workspace.id)
+
+    if (currentModel !== managed.model) {
+      this.sendEvent({ type: 'session_model_changed', sessionId, model: managed.model ?? null }, managed.workspace.id)
+    }
   }
 
   // ============================================
@@ -4264,6 +4357,28 @@ export class SessionManager implements ISessionManager {
     sessionLog.info(`[updateSessionModel] sessionId=${sessionId}, model=${model}, connection=${connection}`)
     const managed = this.sessions.get(sessionId)
     if (managed) {
+      if (connection && managed.connectionLocked && connection !== managed.llmConnection) {
+        throw new Error('Cannot change agent after session has started')
+      }
+
+      const wsConfig = loadWorkspaceConfig(managed.workspace.rootPath)
+      const explicitConnection = connection ? getLlmConnection(connection) : null
+      if (connection && !explicitConnection) {
+        throw new Error(`LLM connection "${connection}" not found`)
+      }
+
+      const targetConnectionSlug = connection && !managed.connectionLocked
+        ? connection
+        : managed.llmConnection
+      const targetConnection = explicitConnection ?? resolveSessionConnection(
+          targetConnectionSlug,
+          wsConfig?.defaults?.defaultLlmConnection,
+        )
+
+      if (targetConnection && !isModelAvailableForConnection(targetConnection, model)) {
+        throw new Error(`Model "${model}" is not available for agent "${targetConnection.name}"`)
+      }
+
       managed.model = model ?? undefined
       // Also update connection if provided and not already locked
       if (connection && !managed.connectionLocked) {
@@ -4278,11 +4393,20 @@ export class SessionManager implements ISessionManager {
       // Update agent model if it already exists (takes effect on next query)
       if (managed.agent) {
         // Fallback chain: session model > workspace default > connection default
-        const wsConfig = loadWorkspaceConfig(managed.workspace.rootPath)
         const sessionConn = resolveSessionConnection(managed.llmConnection, wsConfig?.defaults?.defaultLlmConnection)
-        const effectiveModel = model ?? wsConfig?.defaults?.model ?? sessionConn?.defaultModel!
-        sessionLog.info(`[updateSessionModel] Calling agent.setModel(${effectiveModel}) [agent exists=${!!managed.agent}, connectionLocked=${managed.connectionLocked}]`)
-        managed.agent.setModel(effectiveModel)
+        const effectiveModel = sessionConn
+          ? resolveModelForProvider(
+              providerTypeToAgentProvider(sessionConn.providerType),
+              model ?? wsConfig?.defaults?.model,
+              sessionConn,
+            )
+          : model ?? wsConfig?.defaults?.model
+        if (effectiveModel) {
+          sessionLog.info(`[updateSessionModel] Calling agent.setModel(${effectiveModel}) [agent exists=${!!managed.agent}, connectionLocked=${managed.connectionLocked}]`)
+          managed.agent.setModel(effectiveModel)
+        } else {
+          sessionLog.info('[updateSessionModel] No valid model resolved for live agent; leaving existing model unchanged')
+        }
       } else {
         sessionLog.info(`[updateSessionModel] No agent yet, model will apply on next agent creation`)
       }
@@ -6634,6 +6758,7 @@ export class SessionManager implements ISessionManager {
       CRAFT_WORKSPACE_PATH: workspaceRootPath,
       ...(miniModel ? { ANTHROPIC_DEFAULT_HAIKU_MODEL: miniModel } : {}),
     }
+    await applyAgentCredentialEnvOverrides(backendContext.connection, envOverrides)
 
     const agent = createBackendFromResolvedContext({
       context: backendContext,

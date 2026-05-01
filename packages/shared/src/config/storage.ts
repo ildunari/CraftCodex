@@ -2352,6 +2352,7 @@ export function updateLlmConnection(slug: string, updates: Partial<Omit<LlmConne
     slug: existing.slug,
     name: updates.name ?? existing.name,
     providerType: updates.providerType ?? existing.providerType,
+    agentId: updates.agentId !== undefined ? updates.agentId : existing.agentId,
     type: updates.type ?? existing.type, // Legacy field
     authType: updates.authType ?? existing.authType,
     createdAt: updates.createdAt ?? existing.createdAt,
@@ -2368,6 +2369,14 @@ export function updateLlmConnection(slug: string, updates: Partial<Omit<LlmConne
     piAuthProvider: updates.piAuthProvider !== undefined ? updates.piAuthProvider : existing.piAuthProvider,
     // Custom endpoint protocol (Anthropic/OpenAI compatible)
     customEndpoint: updates.customEndpoint !== undefined ? updates.customEndpoint : existing.customEndpoint,
+    // ACP command bridge
+    acpCommand: updates.acpCommand !== undefined ? updates.acpCommand : existing.acpCommand,
+    acpArgs: updates.acpArgs !== undefined ? updates.acpArgs : existing.acpArgs,
+    // Native Codex app-server command
+    codexCommand: updates.codexCommand !== undefined ? updates.codexCommand : existing.codexCommand,
+    codexArgs: updates.codexArgs !== undefined ? updates.codexArgs : existing.codexArgs,
+    // Command-backed native capability inheritance policy
+    nativeCapabilityPolicy: updates.nativeCapabilityPolicy !== undefined ? updates.nativeCapabilityPolicy : existing.nativeCapabilityPolicy,
     // Timestamps
     lastUsedAt: updates.lastUsedAt !== undefined ? updates.lastUsedAt : existing.lastUsedAt,
   };

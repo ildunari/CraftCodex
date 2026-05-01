@@ -78,6 +78,10 @@ export {
   type SettingsMenuSelectRowProps,
 } from './SettingsMenuSelect'
 
+export {
+  AgentModelSettingsRows,
+} from './AgentModelSettingsRows'
+
 // Inputs
 export {
   SettingsInput,

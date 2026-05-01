@@ -28,6 +28,36 @@
 
 // Core types
 export type {
+  AgentBackendCapabilities,
+} from './capabilities.ts';
+export type {
+  NativeCapabilityDecision,
+  NativeCapabilityInventory,
+  NativeCapabilityItem,
+  NativeCapabilityKind,
+  NativeCapabilityPolicy,
+  NativeCapabilityPolicyMode,
+  NativeCapabilitySource,
+  NativeCapabilitySyncManifest,
+  NativeSkillPassthrough,
+} from './native-capabilities.ts';
+
+export {
+  CONSERVATIVE_BACKEND_CAPABILITIES,
+} from './capabilities.ts';
+export {
+  DEFAULT_NATIVE_CAPABILITY_POLICY,
+  buildCraftCapabilityInventory,
+  capabilityDedupeKey,
+  evaluateNativeCapabilityPolicy,
+  getNativeCapabilityPolicy,
+  normalizeCapabilityName,
+  redactNativeCapabilityManifest,
+  redactNativeCapabilityValue,
+  shadowedMcpServerNames,
+} from './native-capabilities.ts';
+
+export type {
   AgentBackend,
   AgentProvider,
   CoreBackendConfig,
@@ -87,6 +117,9 @@ export { EventQueue } from './event-queue.ts';
 // Provider-specific event adapters
 export { ClaudeEventAdapter } from './claude/event-adapter.ts';
 export { PiEventAdapter } from './pi/event-adapter.ts';
+
+// ACP utility surface for tests and gateway adapters
+export { extractAcpText } from '../acp-agent.ts';
 
 // Agent implementations are imported directly by factory.ts
 // Consumers should use createAgent() / createBackend() instead of concrete classes

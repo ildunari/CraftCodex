@@ -64,7 +64,7 @@ const WorkspaceSchema = z.object({
 // --- LLM Connection schema for config validation ---
 
 const LlmProviderTypeSchema = z.enum([
-  'anthropic', 'anthropic_compat', 'openai', 'openai_compat', 'pi', 'pi_compat', 'bedrock', 'vertex', 'copilot',
+  'anthropic', 'anthropic_compat', 'pi', 'pi_compat', 'bedrock', 'vertex', 'acp', 'codex',
 ]);
 
 const LlmAuthTypeSchema = z.enum([
@@ -72,15 +72,22 @@ const LlmAuthTypeSchema = z.enum([
   'bearer_token', 'service_account_file', 'environment', 'none',
 ]);
 
+const AgentCatalogIdSchema = z.enum(['claude', 'pi', 'codex', 'droid', 'hermes']);
+
 const LlmConnectionSchema = z.object({
   slug: z.string().min(1),
   name: z.string().min(1),
   providerType: LlmProviderTypeSchema,
+  agentId: AgentCatalogIdSchema.optional(),
   authType: LlmAuthTypeSchema,
   baseUrl: z.string().optional(),
   models: z.array(z.union([z.string(), z.object({ id: z.string() }).passthrough()])).optional(),
   defaultModel: z.string().optional(),
   modelSelectionMode: z.enum(['automaticallySyncedFromProvider', 'userDefined3Tier']).optional(),
+  acpCommand: z.string().optional(),
+  acpArgs: z.array(z.string()).optional(),
+  codexCommand: z.string().optional(),
+  codexArgs: z.array(z.string()).optional(),
   createdAt: z.number(),
   // Allow additional fields (codexPath, awsRegion, gcpProjectId, etc.)
 }).passthrough();

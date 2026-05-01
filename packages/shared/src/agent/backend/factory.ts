@@ -35,6 +35,7 @@ import type { LlmConnectionType, CustomEndpointConfig } from '../../config/llm-c
 // Import validation helpers for provider-auth combinations
 import {
   isValidProviderAuthCombination,
+  isModelAvailableForConnection,
 } from '../../config/llm-connections.ts';
 import { parseValidationError, type LlmValidationResult } from '../../config/llm-validation.ts';
 import type { ModelFetchResult } from '../../config/model-fetcher.ts';
@@ -52,6 +53,7 @@ import type {
   ResolvedBackendConfig,
   StoredConnectionValidationResult,
 } from './internal/driver-types.ts';
+import type { AgentBackendCapabilities } from './capabilities.ts';
 import { getDefaultProviderType } from './internal/driver-types.ts';
 import {
   resolveBackendHostTooling as resolveHostToolingPaths,
@@ -59,10 +61,16 @@ import {
 } from './internal/runtime-resolver.ts';
 import { anthropicDriver } from './internal/drivers/anthropic.ts';
 import { piDriver } from './internal/drivers/pi.ts';
+import { acpDriver } from './internal/drivers/acp.ts';
+import { AcpAgent } from '../acp-agent.ts';
+import { codexDriver } from './internal/drivers/codex.ts';
+import { CodexAgent } from '../codex-agent.ts';
 
 const DRIVER_REGISTRY: Record<AgentProvider, ProviderDriver> = {
   anthropic: anthropicDriver,
   pi: piDriver,
+  acp: acpDriver,
+  codex: codexDriver,
 };
 
 function getProviderDriver(provider: AgentProvider): ProviderDriver {
@@ -140,6 +148,14 @@ export function createBackend(config: BackendConfig): AgentBackend {
       // Auth is API key based via Pi's AuthStorage
       return new PiAgent(config);
 
+    case 'acp':
+      // ACP agent implements a command-backed stdio JSON-RPC bridge.
+      return new AcpAgent(config);
+
+    case 'codex':
+      // Native Codex app-server backend.
+      return new CodexAgent(config);
+
     default:
       throw new Error(`Unknown provider: ${config.provider}`);
   }
@@ -183,6 +199,7 @@ export function createBackendFromResolvedContext(args: {
     model: context.resolvedModel,
     connectionSlug: context.connection?.slug,
     runtime,
+    nativeCapabilityPolicy: context.connection?.nativeCapabilityPolicy,
   };
 
   return createBackend(config);
@@ -221,7 +238,7 @@ export function resolveBackendHostTooling(args: {
  * @returns Array of provider identifiers that have working implementations
  */
 export function getAvailableProviders(): AgentProvider[] {
-  return ['anthropic', 'pi'];
+  return ['anthropic', 'pi', 'acp', 'codex'];
 }
 
 /**
@@ -261,6 +278,14 @@ export function providerTypeToAgentProvider(providerType: LlmProviderType): Agen
     case 'pi':
     case 'pi_compat':
       return 'pi';
+
+    // ACP stdio bridge backends
+    case 'acp':
+      return 'acp';
+
+    // Native Codex app-server backend
+    case 'codex':
+      return 'codex';
 
     default:
       // Exhaustive check
@@ -391,7 +416,11 @@ export function resolveSetupTestConnectionHint(args: {
   baseUrl?: string;
   piAuthProvider?: string;
   customEndpoint?: CustomEndpointConfig;
-}): Pick<LlmConnection, 'providerType' | 'piAuthProvider' | 'customEndpoint'> {
+  acpCommand?: string;
+  acpArgs?: string[];
+  codexCommand?: string;
+  codexArgs?: string[];
+}): Pick<LlmConnection, 'providerType' | 'piAuthProvider' | 'customEndpoint' | 'acpCommand' | 'acpArgs' | 'codexCommand' | 'codexArgs'> {
   if (args.provider === 'pi') {
     if (args.customEndpoint && args.baseUrl?.trim()) {
       return {
@@ -404,6 +433,22 @@ export function resolveSetupTestConnectionHint(args: {
     return {
       providerType: 'pi',
       piAuthProvider: args.piAuthProvider,
+    };
+  }
+
+  if (args.provider === 'acp') {
+    return {
+      providerType: 'acp',
+      acpCommand: args.acpCommand,
+      acpArgs: args.acpArgs,
+    };
+  }
+
+  if (args.provider === 'codex') {
+    return {
+      providerType: 'codex',
+      codexCommand: args.codexCommand,
+      codexArgs: args.codexArgs,
     };
   }
 
@@ -517,6 +562,7 @@ export function createConfigFromConnection(
     connectionSlug: connection.slug,
     // Use connection's default model if no model specified in baseConfig
     model: baseConfig.model || connection.defaultModel,
+    nativeCapabilityPolicy: connection.nativeCapabilityPolicy,
   };
 }
 
@@ -585,12 +631,63 @@ export function createBackendFromConnection(
  * Declarative capabilities for each backend provider.
  * Used by the session layer to make decisions without checking provider strings.
  */
-export const BACKEND_CAPABILITIES: Record<AgentProvider, {
-  /** Whether the backend needs an HTTP pool server (external subprocess can't access McpClientPool directly) */
-  needsHttpPoolServer: boolean;
-}> = {
-  anthropic: { needsHttpPoolServer: false },
-  pi: { needsHttpPoolServer: false },
+export const BACKEND_CAPABILITIES: Record<AgentProvider, AgentBackendCapabilities> = {
+  anthropic: {
+    needsHttpPoolServer: false,
+    supportsBranching: true,
+    supportsToolEvents: true,
+    supportsMcpToolEvents: true,
+    supportsPermissionForwarding: true,
+    supportsCancellation: true,
+    supportsSteering: true,
+    supportsModelDiscovery: true,
+    supportsUsageUpdates: true,
+    supportsSessionResume: true,
+    isCommandBacked: false,
+    supportsHealthCheck: true,
+  },
+  pi: {
+    needsHttpPoolServer: false,
+    supportsBranching: true,
+    supportsToolEvents: true,
+    supportsMcpToolEvents: true,
+    supportsPermissionForwarding: true,
+    supportsCancellation: true,
+    supportsSteering: true,
+    supportsModelDiscovery: true,
+    supportsUsageUpdates: true,
+    supportsSessionResume: true,
+    isCommandBacked: false,
+    supportsHealthCheck: true,
+  },
+  acp: {
+    needsHttpPoolServer: false,
+    supportsBranching: false,
+    supportsToolEvents: true,
+    supportsMcpToolEvents: true,
+    supportsPermissionForwarding: true,
+    supportsCancellation: true,
+    supportsSteering: false,
+    supportsModelDiscovery: false,
+    supportsUsageUpdates: false,
+    supportsSessionResume: false,
+    isCommandBacked: true,
+    supportsHealthCheck: true,
+  },
+  codex: {
+    needsHttpPoolServer: false,
+    supportsBranching: false,
+    supportsToolEvents: true,
+    supportsMcpToolEvents: true,
+    supportsPermissionForwarding: true,
+    supportsCancellation: true,
+    supportsSteering: true,
+    supportsModelDiscovery: true,
+    supportsUsageUpdates: true,
+    supportsSessionResume: true,
+    isCommandBacked: true,
+    supportsHealthCheck: true,
+  },
 };
 
 // ============================================================
@@ -607,6 +704,8 @@ export function getDefaultAuthType(provider: AgentProvider): LlmAuthType | undef
   switch (provider) {
     case 'anthropic': return undefined;
     case 'pi':        return 'api_key';
+    case 'acp':       return 'none';
+    case 'codex':     return 'none';
     default:          return undefined;
   }
 }
@@ -643,8 +742,24 @@ export function resolveModelForProvider(
 
   switch (provider) {
     case 'pi':
+      if (connection && !isModelAvailableForConnection(connection, managedModel)) {
+        managedModel = undefined;
+      }
       return managedModel || connection?.defaultModel || '';
+    case 'acp':
+      if (connection && !isModelAvailableForConnection(connection, managedModel)) {
+        managedModel = undefined;
+      }
+      return managedModel || connection?.defaultModel || '';
+    case 'codex':
+      if (connection && !isModelAvailableForConnection(connection, managedModel)) {
+        managedModel = undefined;
+      }
+      return managedModel || connection?.defaultModel || 'gpt-5.5';
     default:
+      if (connection && !isModelAvailableForConnection(connection, managedModel)) {
+        managedModel = undefined;
+      }
       return managedModel || connection?.defaultModel || DEFAULT_MODEL;
   }
 }
@@ -679,10 +794,11 @@ export async function testBackendConnection(args: {
   hostRuntime: BackendHostRuntimeContext;
   timeoutMs?: number;
   allowEmptyApiKey?: boolean;
-  connection?: Pick<LlmConnection, 'providerType' | 'piAuthProvider' | 'customEndpoint'>;
+  connection?: Pick<LlmConnection, 'providerType' | 'agentId' | 'piAuthProvider' | 'customEndpoint' | 'acpCommand' | 'acpArgs' | 'codexCommand' | 'codexArgs'>;
 }): Promise<{ success: boolean; error?: string }> {
   const trimmedKey = args.apiKey.trim();
-  if (!trimmedKey && !args.allowEmptyApiKey) {
+  const isKeylessProvider = args.provider === 'codex' || args.provider === 'acp';
+  if (!trimmedKey && !args.allowEmptyApiKey && !isKeylessProvider) {
     return { success: false, error: 'API key is required' };
   }
 
@@ -696,21 +812,27 @@ export async function testBackendConnection(args: {
     const testModel = args.model;
     const providerType = args.connection?.providerType ?? getDefaultProviderType(args.provider);
     const now = Date.now();
-    const authType: LlmAuthType = (
-      providerType === 'anthropic_compat' || providerType === 'pi_compat'
-    )
-      ? 'api_key_with_endpoint'
-      : 'api_key';
+    let authType: LlmAuthType = 'api_key';
+    if (providerType === 'acp' || providerType === 'codex') {
+      authType = 'none';
+    } else if (providerType === 'anthropic_compat' || providerType === 'pi_compat') {
+      authType = 'api_key_with_endpoint';
+    }
 
     const syntheticConnection = {
       slug: tempSlug,
       name: 'Temporary Connection Test',
       providerType,
+      agentId: args.connection?.agentId,
       authType,
       defaultModel: testModel,
       createdAt: now,
       piAuthProvider: args.connection?.piAuthProvider,
       customEndpoint: args.connection?.customEndpoint,
+      acpCommand: args.connection?.acpCommand,
+      acpArgs: args.connection?.acpArgs,
+      codexCommand: args.connection?.codexCommand,
+      codexArgs: args.connection?.codexArgs,
       ...(args.baseUrl?.trim() ? { baseUrl: args.baseUrl.trim() } : {}),
     } as LlmConnection;
 
@@ -819,6 +941,14 @@ export async function validateConnection(
 
     case 'pi':
       // Pi validates on connect via its auth storage — no pre-flight check available
+      return { success: true };
+
+    case 'acp':
+      // ACP command availability is validated when the subprocess starts.
+      return { success: true };
+
+    case 'codex':
+      // Codex app-server availability is validated when the subprocess starts.
       return { success: true };
 
     default:

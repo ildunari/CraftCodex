@@ -27,6 +27,7 @@ import { buildCallLlmRequest, type LLMQueryRequest, type LLMQueryResult } from '
 import { getLlmConnections, getDefaultLlmConnection } from '../config/storage.ts';
 import { loadAllSources } from '../sources/storage.ts';
 import type { ApiServerConfig } from '../mcp/mcp-pool.ts';
+import type { NativeCapabilitySyncManifest } from './backend/native-capabilities.ts';
 
 import type {
   AgentBackend,
@@ -166,6 +167,10 @@ export abstract class BaseAgent implements AgentBackend {
   /** Whether this backend supports session branching. Subclasses can override. */
   protected _supportsBranching = true;
   get supportsBranching(): boolean { return this._supportsBranching; }
+
+  getNativeCapabilityManifest(): NativeCapabilitySyncManifest | null {
+    return this.config.nativeCapabilityManifest || null;
+  }
 
   // ============================================================
   // Configuration (protected for subclass access)

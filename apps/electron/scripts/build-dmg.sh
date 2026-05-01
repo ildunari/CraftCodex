@@ -58,6 +58,7 @@ Environment variables (from .env or environment):
   APPLE_TEAM_ID             - Apple Team ID
   APPLE_APP_SPECIFIC_PASSWORD - App-specific password
   S3_VERSIONS_BUCKET_*      - S3 credentials (for --upload)
+  CRAFTCODEX_UPDATE_FEED_URL - Feed URL to bake into CraftCodex update-enabled builds
 EOF
     exit 0
 }
@@ -80,7 +81,7 @@ done
 # Configuration
 BUN_VERSION="bun-v1.3.9"  # Pinned version for reproducible builds
 
-echo "=== Building Craft Agents DMG (${ARCH}) using electron-builder ==="
+echo "=== Building CraftCodex DMG (${ARCH}) using electron-builder ==="
 if [ "$UPLOAD" = true ]; then
     echo "Will upload to S3 after build"
 fi
@@ -91,6 +92,7 @@ rm -rf "$ELECTRON_DIR/vendor"
 rm -rf "$ELECTRON_DIR/node_modules/@anthropic-ai"
 rm -rf "$ELECTRON_DIR/packages"
 rm -rf "$ELECTRON_DIR/release"
+rm -rf "$ELECTRON_DIR"/release-*
 
 # 2. Install dependencies
 echo "Installing dependencies..."
@@ -183,8 +185,8 @@ fi
 npx electron-builder $BUILDER_ARGS
 
 # 8. Verify the DMG was built
-# electron-builder.yml uses artifactName to output: Craft-Agents-${arch}.dmg
-DMG_NAME="Craft-Agents-${ARCH}.dmg"
+# electron-builder.yml uses artifactName to output: CraftCodex-${arch}.dmg
+DMG_NAME="CraftCodex-${ARCH}.dmg"
 DMG_PATH="$ELECTRON_DIR/release/$DMG_NAME"
 
 if [ ! -f "$DMG_PATH" ]; then
@@ -212,10 +214,11 @@ if [ "$UPLOAD" = true ]; then
     echo "=== Uploading to S3 ==="
 
     # Check for S3 credentials
-    if [ -z "$S3_VERSIONS_BUCKET_ENDPOINT" ] || [ -z "$S3_VERSIONS_BUCKET_ACCESS_KEY_ID" ] || [ -z "$S3_VERSIONS_BUCKET_SECRET_ACCESS_KEY" ]; then
+    if [ -z "$S3_VERSIONS_BUCKET_ENDPOINT" ] || { [ -z "$S3_VERSIONS_BUCKET_NAME" ] && [ -z "$S3_VERSIONS_BUCKET" ]; } || [ -z "$S3_VERSIONS_BUCKET_ACCESS_KEY_ID" ] || [ -z "$S3_VERSIONS_BUCKET_SECRET_ACCESS_KEY" ]; then
         cat << EOF
 ERROR: Missing S3 credentials. Set these environment variables:
   S3_VERSIONS_BUCKET_ENDPOINT
+  S3_VERSIONS_BUCKET_NAME (or S3_VERSIONS_BUCKET)
   S3_VERSIONS_BUCKET_ACCESS_KEY_ID
   S3_VERSIONS_BUCKET_SECRET_ACCESS_KEY
 

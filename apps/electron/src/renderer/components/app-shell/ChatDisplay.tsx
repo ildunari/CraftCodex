@@ -2062,6 +2062,8 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
               onWorkingDirectoryChange,
               disableSend: disableSend || connectionUnavailable,
               connectionUnavailable,
+              backendCapabilities: session.backendCapabilities,
+              nativeCapabilityManifest: session.nativeCapabilityManifest,
               isEmptySession: session.messages.length === 0,
               currentConnection: session.llmConnection,
               onConnectionChange,

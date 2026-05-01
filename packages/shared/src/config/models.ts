@@ -47,7 +47,7 @@ function bedrockToBarId(modelId: string): string {
 /**
  * Provider identifier for AI backends.
  */
-export type ModelProvider = 'anthropic' | 'pi';
+export type ModelProvider = 'anthropic' | 'pi' | 'acp' | 'codex';
 
 /**
  * Full model definition with capabilities and costs.
@@ -113,6 +113,20 @@ export const MODEL_REGISTRY: ModelDefinition[] = [
   //   - Pi: getModels(provider) from @mariozechner/pi-ai SDK
   // See ModelRefreshService in apps/electron/src/main/model-fetchers/
   // ----------------------------------------
+
+  // ----------------------------------------
+  // Codex App Server Models
+  // These are conservative defaults. Native Codex connections can refresh
+  // the live list from `codex app-server model/list`.
+  // ----------------------------------------
+  {
+    id: 'gpt-5.5',
+    name: 'GPT-5.5',
+    shortName: 'GPT-5.5',
+    description: 'Codex app-server default model',
+    provider: 'codex',
+    contextWindow: 272_000,
+  },
 ];
 
 // ============================================
