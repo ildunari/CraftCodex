@@ -58,6 +58,47 @@ describe('AcpPromptQueue', () => {
     await expect(ok).resolves.toBeUndefined();
   });
 
+  it('acquire/release serializes generator-friendly callers', async () => {
+    const q = new AcpPromptQueue();
+    const order: string[] = [];
+
+    const slotA = q.acquire();
+    const slotB = q.acquire();
+    const slotC = q.acquire();
+
+    await slotA.ready;
+    order.push('A-acquired');
+
+    // Subsequent acquires must wait until prior release
+    let bResolved = false;
+    void slotB.ready.then(() => { bResolved = true; });
+    await new Promise(r => setTimeout(r, 0));
+    expect(bResolved).toBe(false);
+
+    slotA.release();
+    await slotB.ready;
+    order.push('B-acquired');
+    expect(bResolved).toBe(true);
+
+    slotB.release();
+    await slotC.ready;
+    order.push('C-acquired');
+    slotC.release();
+
+    expect(order).toEqual(['A-acquired', 'B-acquired', 'C-acquired']);
+  });
+
+  it('release is idempotent', async () => {
+    const q = new AcpPromptQueue();
+    const slot = q.acquire();
+    await slot.ready;
+    slot.release();
+    slot.release(); // must not blow up or break next slot
+    const next = q.acquire();
+    await next.ready;
+    next.release();
+  });
+
   it('cancelAll rejects waiting tasks but lets the running one settle', async () => {
     const q = new AcpPromptQueue();
     const running = deferred();

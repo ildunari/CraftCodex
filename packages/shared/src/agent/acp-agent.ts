@@ -28,6 +28,8 @@ import {
   parsePermissionRequestParams,
   pickOptionId,
 } from './acp/acp-permissions.ts';
+import { withTimeout } from './acp/acp-timeout.ts';
+import { AcpPromptQueue } from './acp/acp-prompt-queue.ts';
 
 /** Re-export so the existing test import (`{ extractAcpText } from '../acp-agent'`) keeps working. */
 export const extractAcpText = helperExtractAcpText;
@@ -179,6 +181,22 @@ export class AcpAgent extends BaseAgent {
     requestId: string | number;
     options: PermissionOption[];
   }>();
+  private promptQueue = new AcpPromptQueue();
+
+  private static readonly DEFAULT_TIMEOUTS = {
+    initialize: 10_000,
+    sessionNew: 10_000,
+    sessionLoad: 10_000,
+    sessionCancel: 2_000,
+    prompt: 0, // unbounded by default; long turns are normal
+  } as const;
+
+  private getRequestTimeoutMs(label: keyof typeof AcpAgent.DEFAULT_TIMEOUTS): number {
+    const runtime = getBackendRuntime(this.config) as { acpRequestTimeoutMs?: Partial<typeof AcpAgent.DEFAULT_TIMEOUTS> };
+    const override = runtime.acpRequestTimeoutMs?.[label];
+    if (typeof override === 'number' && Number.isFinite(override)) return override;
+    return AcpAgent.DEFAULT_TIMEOUTS[label];
+  }
 
   constructor(config: BackendConfig) {
     super(config, config.model || '');
@@ -193,6 +211,12 @@ export class AcpAgent extends BaseAgent {
     attachments?: FileAttachment[],
     _options?: ChatOptions,
   ): AsyncGenerator<AgentEvent> {
+    // Serialize concurrent chat() calls so they don't race on the shared
+    // subprocess, eventQueue, currentTurnText, or session id. The slot is
+    // released at the end of this turn; queued callers proceed in order.
+    const slot = this.promptQueue.acquire();
+    await slot.ready;
+
     this._isProcessing = true;
     this.abortReason = undefined;
     this.eventQueue.reset();
@@ -235,6 +259,7 @@ export class AcpAgent extends BaseAgent {
       }
     } finally {
       this._isProcessing = false;
+      slot.release();
       yield { type: 'complete' };
     }
   }
@@ -311,8 +336,62 @@ export class AcpAgent extends BaseAgent {
       pending.resolve({ allowed: false, alwaysAllow: false });
     }
     this.pendingPermissions.clear();
-    void this.sendRequest('session/cancel', { sessionId: this.acpSessionId }).catch(() => {});
-    this.eventQueue.complete();
+    // Cooperative cancel first; if the agent doesn't ack within the grace
+    // window, escalate to SIGTERM and finally SIGKILL. The event queue is
+    // completed regardless once we've stopped trying.
+    void this.shutdownSubprocessGracefully().finally(() => {
+      this.eventQueue.complete();
+    });
+  }
+
+  /**
+   * Cancel + graceful kill chain.
+   *
+   * Sequence (bounded):
+   *  1) Send `session/cancel` — wait up to `sessionCancel` timeout for ack.
+   *  2) If the subprocess is still alive, send SIGTERM and wait `cancelTermGraceMs`.
+   *  3) If still alive, send SIGKILL.
+   *
+   * Each step is a no-op if the subprocess has already exited.
+   */
+  private async shutdownSubprocessGracefully(): Promise<void> {
+    const child = this.subprocess;
+    if (!child) return;
+
+    const sessionId = this.acpSessionId;
+    if (sessionId) {
+      try {
+        await withTimeout(
+          this.sendRequest('session/cancel', { sessionId }),
+          this.getRequestTimeoutMs('sessionCancel'),
+          'session/cancel',
+        );
+      } catch {
+        // Cancel timed out or errored — fall through to kill chain.
+      }
+    }
+
+    if (child.exitCode != null || child.signalCode != null) return;
+
+    const runtime = getBackendRuntime(this.config) as { acpCancelTermGraceMs?: number };
+    const grace = typeof runtime.acpCancelTermGraceMs === 'number' && runtime.acpCancelTermGraceMs >= 0
+      ? runtime.acpCancelTermGraceMs
+      : 2_000;
+
+    try { child.kill('SIGTERM'); } catch { /* ignore */ }
+
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        try {
+          if (child.exitCode == null && child.signalCode == null) child.kill('SIGKILL');
+        } catch { /* ignore */ }
+        resolve();
+      }, grace);
+      child.once('exit', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
   }
 
   destroy(): void {
@@ -327,17 +406,21 @@ export class AcpAgent extends BaseAgent {
     }
 
     this.spawnSubprocess();
-    this.initialized = this.sendRequest('initialize', {
-      protocolVersion: 1,
-      clientCapabilities: {
-        fs: { readTextFile: false, writeTextFile: false },
-        terminal: false,
-      },
-      clientInfo: {
-        name: 'craft-agent',
-        version: '0.0.0',
-      },
-    }).then((result) => {
+    this.initialized = withTimeout(
+      this.sendRequest('initialize', {
+        protocolVersion: 1,
+        clientCapabilities: {
+          fs: { readTextFile: false, writeTextFile: false },
+          terminal: false,
+        },
+        clientInfo: {
+          name: 'craft-agent',
+          version: '0.0.0',
+        },
+      }),
+      this.getRequestTimeoutMs('initialize'),
+      'initialize',
+    ).then((result) => {
       const caps = asRecord(asRecord(result)?.agentCapabilities ?? asRecord(result)?.capabilities);
       this.agentCapabilities = caps as AgentCapabilities | null;
     });
@@ -394,11 +477,15 @@ export class AcpAgent extends BaseAgent {
   private async ensureSession(): Promise<void> {
     if (this.acpSessionId) return;
 
-    const result = await this.sendRequest('session/new', {
-      cwd: this.resolvedCwd(),
-      mcpServers: normalizeAcpMcpServers(this.config.initialSources?.mcpServers),
-      _meta: this.buildSessionInitMeta(),
-    });
+    const result = await withTimeout(
+      this.sendRequest('session/new', {
+        cwd: this.resolvedCwd(),
+        mcpServers: normalizeAcpMcpServers(this.config.initialSources?.mcpServers),
+        _meta: this.buildSessionInitMeta(),
+      }),
+      this.getRequestTimeoutMs('sessionNew'),
+      'session/new',
+    );
 
     this.acpSessionId = this.extractSessionId(result) || this.config.session?.id || this._sessionId;
     // A freshly created session needs systemContext on its first prompt;

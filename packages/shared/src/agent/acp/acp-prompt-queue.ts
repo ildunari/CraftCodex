@@ -25,6 +25,34 @@ export class AcpPromptQueue {
     });
   }
 
+  /**
+   * Generator-friendly variant. Returns `{ ready, release }` where `ready`
+   * resolves when this slot reaches the head of the queue. Callers MUST call
+   * `release()` exactly once — typically in a `finally` block — to let the
+   * next slot proceed.
+   */
+  acquire(): { ready: Promise<void>; release: () => void } {
+    let releaseSlot!: () => void;
+    const released = new Promise<void>((res) => { releaseSlot = res; });
+    let signalReady!: () => void;
+    const ready = new Promise<void>((res) => { signalReady = res; });
+
+    void this.enqueue(async () => {
+      signalReady();
+      await released;
+    });
+
+    let releasedFlag = false;
+    return {
+      ready,
+      release: () => {
+        if (releasedFlag) return;
+        releasedFlag = true;
+        releaseSlot();
+      },
+    };
+  }
+
   /** Number of tasks waiting (excluding the one currently running). */
   get pending(): number {
     return this.queue.length;

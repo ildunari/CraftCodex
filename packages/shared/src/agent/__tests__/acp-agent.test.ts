@@ -365,4 +365,78 @@ rl.on('line', (line) => {
 
     expect(events).toContainEqual({ type: 'text_delta', text: 'picked:b' });
   });
+
+  it('serializes concurrent chat() calls so streams do not interleave', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'craft-acp-queue-'));
+    const scriptPath = join(dir, 'fixture-acp-queue.mjs');
+    // The fixture stamps each prompt response with a sequence number so we can
+    // verify that the second chat() turn waits for the first to finish.
+    await writeFile(scriptPath, `
+import readline from 'node:readline';
+const rl = readline.createInterface({ input: process.stdin });
+let promptSeq = 0;
+function send(value) { process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n'); }
+rl.on('line', async (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') return send({ id: msg.id, result: { protocolVersion: 1 } });
+  if (msg.method === 'session/new') return send({ id: msg.id, result: { sessionId: 's-q' } });
+  if (msg.method === 'session/prompt') {
+    promptSeq += 1;
+    const seq = promptSeq;
+    // Emit two chunks separated by a tiny delay so interleaving would be visible.
+    send({ method: 'session/update', params: { sessionId: 's-q', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'turn' + seq + '-a' } } } });
+    await new Promise(r => setTimeout(r, 30));
+    send({ method: 'session/update', params: { sessionId: 's-q', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'turn' + seq + '-b' } } } });
+    send({ id: msg.id, result: { stopReason: 'end_turn' } });
+  }
+});
+`, 'utf8');
+    const agent = new AcpAgent(createConfig(scriptPath));
+
+    const drain = async (gen: AsyncIterable<any>): Promise<any[]> => {
+      const out: any[] = [];
+      for await (const event of gen) out.push(event);
+      return out;
+    };
+
+    try {
+      const [a, b] = await Promise.all([
+        drain(agent.chat('one')),
+        drain(agent.chat('two')),
+      ]);
+      const aTexts = a.filter(e => e.type === 'text_delta').map(e => e.text);
+      const bTexts = b.filter(e => e.type === 'text_delta').map(e => e.text);
+      // Both turns saw their own chunks in order, with no cross-contamination.
+      expect(aTexts).toEqual(['turn1-a', 'turn1-b']);
+      expect(bTexts).toEqual(['turn2-a', 'turn2-b']);
+    } finally {
+      agent.destroy();
+    }
+  });
+
+  it('rejects with a timeout error when initialize never responds', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'craft-acp-init-timeout-'));
+    const scriptPath = join(dir, 'fixture-acp-init-timeout.mjs');
+    // Server reads stdin but never replies — initialize must time out.
+    await writeFile(scriptPath, `
+import readline from 'node:readline';
+const rl = readline.createInterface({ input: process.stdin });
+rl.on('line', () => { /* swallow forever */ });
+`, 'utf8');
+    const config = createConfig(scriptPath);
+    config.runtime = {
+      ...(config.runtime ?? {}),
+      acpRequestTimeoutMs: { initialize: 250 },
+    };
+    const agent = new AcpAgent(config);
+    const events: any[] = [];
+    try {
+      for await (const event of agent.chat('hi')) events.push(event);
+    } finally {
+      agent.destroy();
+    }
+    const errEvents = events.filter(e => e.type === 'error');
+    expect(errEvents.length).toBeGreaterThan(0);
+    expect(errEvents[0].message).toContain('initialize timed out');
+  });
 });
