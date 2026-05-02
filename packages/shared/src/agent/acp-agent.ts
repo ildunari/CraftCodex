@@ -30,6 +30,7 @@ import {
 } from './acp/acp-permissions.ts';
 import { withTimeout } from './acp/acp-timeout.ts';
 import { AcpPromptQueue } from './acp/acp-prompt-queue.ts';
+import { createNdjsonMirror, type NdjsonMirror } from './acp/acp-debug.ts';
 
 /** Re-export so the existing test import (`{ extractAcpText } from '../acp-agent'`) keeps working. */
 export const extractAcpText = helperExtractAcpText;
@@ -206,6 +207,14 @@ export class AcpAgent extends BaseAgent {
     if (config.session?.acpSessionId) {
       this.acpSessionId = config.session.acpSessionId;
     }
+    const runtime = getBackendRuntime(config) as { acpNdjsonPath?: string };
+    this.ndjson = createNdjsonMirror({
+      path: runtime.acpNdjsonPath,
+      tag: config.session?.id,
+    });
+    if (this.ndjson.enabled) {
+      this.debug(`ACP NDJSON mirror enabled: ${this.ndjson.path}`);
+    }
     if (!config.isHeadless) {
       this.startConfigWatcher();
     }
@@ -220,6 +229,9 @@ export class AcpAgent extends BaseAgent {
    * session against the freshly spawned process.
    */
   private sessionEstablished = false;
+
+  /** Optional NDJSON mirror for protocol traffic (gated by env / runtime). */
+  private ndjson: NdjsonMirror | null = null;
 
   protected async *chatImpl(
     message: string,
@@ -254,10 +266,28 @@ export class AcpAgent extends BaseAgent {
         // Mark first-turn-after-(new|load) as consumed; subsequent prompts
         // skip systemContext to avoid resending it every turn.
         this.firstTurnInSession = false;
-        const resultText = extractAcpText(result).join('');
-        const finalText = this.combineStreamAndResult(this.currentTurnText, resultText);
+
+        // Stream is authoritative. The session/prompt result carries
+        // `stopReason` (per spec) — use any text only as a fallback when
+        // the agent never streamed anything (some servers only emit
+        // final-result text instead of agent_message_chunk).
+        let finalText = this.currentTurnText;
+        if (!finalText) {
+          const fallback = extractAcpText(result).join('');
+          if (fallback) {
+            this.debug('stream was empty; falling back to session/prompt result text');
+            finalText = fallback;
+          }
+        }
         if (finalText) {
           this.eventQueue.enqueue({ type: 'text_complete', text: finalText });
+        }
+
+        // Surface the spec-shaped stop reason so the UI can distinguish
+        // end_turn from cancelled / max_tokens / refusal etc.
+        const reason = this.extractStopReason(result);
+        if (reason) {
+          this.eventQueue.enqueue({ type: 'stop_reason', reason });
         }
       }).catch((error) => {
         if (this.abortReason) return;
@@ -321,8 +351,12 @@ export class AcpAgent extends BaseAgent {
     const result = await this.sendRequest('session/prompt', params);
     this.firstTurnInSession = false;
 
-    const resultText = extractAcpText(result).join('');
-    return this.combineStreamAndResult(this.currentTurnText, resultText).trim() || null;
+    // Stream-authoritative; fall back to result text only when nothing streamed.
+    let text = this.currentTurnText.trim();
+    if (!text) {
+      text = extractAcpText(result).join('').trim();
+    }
+    return text || null;
   }
 
   async queryLlm(request: LLMQueryRequest): Promise<LLMQueryResult> {
@@ -417,6 +451,8 @@ export class AcpAgent extends BaseAgent {
 
   destroy(): void {
     this.killSubprocess();
+    this.ndjson?.close();
+    this.ndjson = null;
     super.destroy();
   }
 
@@ -609,6 +645,7 @@ export class AcpAgent extends BaseAgent {
       this.debug(`Ignoring non-JSON ACP line: ${trimmed.slice(0, 200)}`);
       return;
     }
+    this.ndjson?.logIn(message);
 
     if (message.id != null && this.pending.has(message.id)) {
       const pending = this.pending.get(message.id)!;
@@ -886,6 +923,7 @@ export class AcpAgent extends BaseAgent {
     if (!this.subprocess?.stdin?.writable) {
       throw new Error('ACP subprocess is not running');
     }
+    this.ndjson?.logOut(payload);
     this.subprocess.stdin.write(`${JSON.stringify(payload)}\n`, callback);
   }
 
@@ -944,10 +982,13 @@ export class AcpAgent extends BaseAgent {
     return JSON.stringify(error);
   }
 
-  private combineStreamAndResult(streamed: string, result: string): string {
-    if (!streamed) return result;
-    if (!result) return streamed;
-    return result.startsWith(streamed) ? result : `${streamed}${result}`;
+  private extractStopReason(value: unknown): 'end_turn' | 'max_tokens' | 'max_turn_requests' | 'refusal' | 'cancelled' | null {
+    if (!value || typeof value !== 'object') return null;
+    const reason = (value as { stopReason?: unknown }).stopReason;
+    if (reason === 'end_turn' || reason === 'max_tokens' || reason === 'max_turn_requests' || reason === 'refusal' || reason === 'cancelled') {
+      return reason;
+    }
+    return null;
   }
 
   private buildCraftContext(): string {

@@ -213,8 +213,103 @@ describe('AcpAgent', () => {
       isError: false,
       parentToolUseId: undefined,
     });
-    expect(events).toContainEqual({ type: 'text_complete', text: 'hello world' });
+    // Stream-authoritative: text_complete reflects only what was streamed.
+    // The 'world' text from the session/prompt result block is NOT appended.
+    expect(events).toContainEqual({ type: 'text_complete', text: 'hello ' });
     expect(events.at(-1)).toEqual({ type: 'complete' });
+  });
+
+  it('falls back to result text when nothing streamed', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'craft-acp-resultonly-'));
+    const scriptPath = join(dir, 'fixture-acp-resultonly.mjs');
+    await writeFile(scriptPath, `
+import readline from 'node:readline';
+const rl = readline.createInterface({ input: process.stdin });
+function send(value) { process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n'); }
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') return send({ id: msg.id, result: { protocolVersion: 1 } });
+  if (msg.method === 'session/new') return send({ id: msg.id, result: { sessionId: 's-r' } });
+  if (msg.method === 'session/prompt') {
+    // No session/update at all — agent only emits final result text.
+    return send({ id: msg.id, result: { content: [{ text: 'final-only-text' }], stopReason: 'end_turn' } });
+  }
+});
+`, 'utf8');
+    const agent = new AcpAgent(createConfig(scriptPath));
+    const events: any[] = [];
+    try {
+      for await (const event of agent.chat('hi')) events.push(event);
+    } finally {
+      agent.destroy();
+    }
+    expect(events).toContainEqual({ type: 'text_complete', text: 'final-only-text' });
+    expect(events).toContainEqual({ type: 'stop_reason', reason: 'end_turn' });
+  });
+
+  it('emits stop_reason event before complete when result includes stopReason', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'craft-acp-stop-'));
+    const scriptPath = join(dir, 'fixture-acp-stop.mjs');
+    await writeFile(scriptPath, `
+import readline from 'node:readline';
+const rl = readline.createInterface({ input: process.stdin });
+function send(value) { process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n'); }
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') return send({ id: msg.id, result: { protocolVersion: 1 } });
+  if (msg.method === 'session/new') return send({ id: msg.id, result: { sessionId: 's-stop' } });
+  if (msg.method === 'session/prompt') {
+    send({ method: 'session/update', params: { sessionId: 's-stop', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'chunked' } } } });
+    return send({ id: msg.id, result: { stopReason: 'max_tokens' } });
+  }
+});
+`, 'utf8');
+    const agent = new AcpAgent(createConfig(scriptPath));
+    const events: any[] = [];
+    try {
+      for await (const event of agent.chat('hi')) events.push(event);
+    } finally {
+      agent.destroy();
+    }
+    const stopIdx = events.findIndex(e => e.type === 'stop_reason');
+    const completeIdx = events.findIndex(e => e.type === 'complete');
+    expect(stopIdx).toBeGreaterThanOrEqual(0);
+    expect(completeIdx).toBeGreaterThan(stopIdx);
+    expect(events[stopIdx]).toEqual({ type: 'stop_reason', reason: 'max_tokens' });
+  });
+
+  it('writes JSON-RPC frames to the configured NDJSON path', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'craft-acp-ndjson-'));
+    const scriptPath = join(dir, 'fixture-acp-ndjson.mjs');
+    await writeFile(scriptPath, `
+import readline from 'node:readline';
+const rl = readline.createInterface({ input: process.stdin });
+function send(value) { process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n'); }
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') return send({ id: msg.id, result: { protocolVersion: 1 } });
+  if (msg.method === 'session/new') return send({ id: msg.id, result: { sessionId: 's-nd' } });
+  if (msg.method === 'session/prompt') return send({ id: msg.id, result: { stopReason: 'end_turn' } });
+});
+`, 'utf8');
+    const ndjsonPath = join(dir, 'mirror.ndjson');
+    const config = createConfig(scriptPath);
+    config.runtime = { ...(config.runtime ?? {}), acpNdjsonPath: ndjsonPath };
+    const agent = new AcpAgent(config);
+    try {
+      for await (const _ of agent.chat('hi')) { /* drain */ }
+    } finally {
+      agent.destroy();
+    }
+    // Allow a tick for the write stream to flush.
+    await new Promise(r => setTimeout(r, 50));
+    const { readFileSync } = await import('node:fs');
+    const lines = readFileSync(ndjsonPath, 'utf8').trim().split('\n').filter(Boolean);
+    expect(lines.length).toBeGreaterThan(0);
+    const frames = lines.map(l => JSON.parse(l));
+    expect(frames.some(f => f.dir === 'out' && f.frame?.method === 'initialize')).toBe(true);
+    expect(frames.some(f => f.dir === 'in' && f.frame?.id != null)).toBe(true);
+    expect(frames.some(f => f.dir === 'out' && f.frame?.method === 'session/prompt')).toBe(true);
   });
 
   it('routes agent_thought_chunk content into thinking events', async () => {
