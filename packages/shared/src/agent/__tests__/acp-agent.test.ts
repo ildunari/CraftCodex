@@ -414,6 +414,115 @@ rl.on('line', async (line) => {
     }
   });
 
+  it('uses session/load when the agent advertises loadSession and we have a saved id', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'craft-acp-load-'));
+    const scriptPath = join(dir, 'fixture-acp-load.mjs');
+    await writeFile(scriptPath, `
+import readline from 'node:readline';
+const rl = readline.createInterface({ input: process.stdin });
+function send(value) { process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n'); }
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') {
+    return send({ id: msg.id, result: { protocolVersion: 1, agentCapabilities: { loadSession: true } } });
+  }
+  if (msg.method === 'session/load') {
+    if (msg.params?.sessionId === 'persisted-1') return send({ id: msg.id, result: {} });
+    return send({ id: msg.id, error: { code: -32602, message: 'unknown session' } });
+  }
+  if (msg.method === 'session/new') {
+    return send({ id: msg.id, result: { sessionId: 'fresh-1' } });
+  }
+  if (msg.method === 'session/prompt') {
+    send({ method: 'session/update', params: { sessionId: msg.params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'on:' + msg.params.sessionId } } } });
+    return send({ id: msg.id, result: { stopReason: 'end_turn' } });
+  }
+});
+`, 'utf8');
+    const config = createConfig(scriptPath);
+    config.session = { ...config.session!, acpSessionId: 'persisted-1' };
+    const agent = new AcpAgent(config);
+    const events: any[] = [];
+    try {
+      for await (const event of agent.chat('hi')) events.push(event);
+    } finally {
+      agent.destroy();
+    }
+    // Loaded onto the persisted id rather than starting fresh.
+    expect(events).toContainEqual({ type: 'text_delta', text: 'on:persisted-1' });
+  });
+
+  it('persists captured acpSessionId via onAcpSessionIdUpdate on first session/new', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'craft-acp-persist-'));
+    const scriptPath = join(dir, 'fixture-acp-persist.mjs');
+    await writeFile(scriptPath, `
+import readline from 'node:readline';
+const rl = readline.createInterface({ input: process.stdin });
+function send(value) { process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n'); }
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') return send({ id: msg.id, result: { protocolVersion: 1 } });
+  if (msg.method === 'session/new') return send({ id: msg.id, result: { sessionId: 'fresh-acp' } });
+  if (msg.method === 'session/prompt') {
+    send({ method: 'session/update', params: { sessionId: 'fresh-acp', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'ok' } } } });
+    return send({ id: msg.id, result: { stopReason: 'end_turn' } });
+  }
+});
+`, 'utf8');
+    const config = createConfig(scriptPath);
+    let captured = '';
+    config.onAcpSessionIdUpdate = (id: string) => { captured = id; };
+    const agent = new AcpAgent(config);
+    try {
+      for await (const _ of agent.chat('hi')) { /* drain */ }
+    } finally {
+      agent.destroy();
+    }
+    expect(captured).toBe('fresh-acp');
+  });
+
+  it('falls back to session/new when session/load errors', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'craft-acp-load-fallback-'));
+    const scriptPath = join(dir, 'fixture-acp-load-fallback.mjs');
+    await writeFile(scriptPath, `
+import readline from 'node:readline';
+const rl = readline.createInterface({ input: process.stdin });
+function send(value) { process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n'); }
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') {
+    return send({ id: msg.id, result: { protocolVersion: 1, agentCapabilities: { loadSession: true } } });
+  }
+  if (msg.method === 'session/load') {
+    return send({ id: msg.id, error: { code: -32602, message: 'unknown session' } });
+  }
+  if (msg.method === 'session/new') {
+    return send({ id: msg.id, result: { sessionId: 'recovered' } });
+  }
+  if (msg.method === 'session/prompt') {
+    send({ method: 'session/update', params: { sessionId: msg.params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'on:' + msg.params.sessionId } } } });
+    return send({ id: msg.id, result: { stopReason: 'end_turn' } });
+  }
+});
+`, 'utf8');
+    const config = createConfig(scriptPath);
+    config.session = { ...config.session!, acpSessionId: 'stale-id' };
+    let cleared = false;
+    let updatedTo = '';
+    config.onAcpSessionIdCleared = () => { cleared = true; };
+    config.onAcpSessionIdUpdate = (id: string) => { updatedTo = id; };
+    const agent = new AcpAgent(config);
+    const events: any[] = [];
+    try {
+      for await (const event of agent.chat('hi')) events.push(event);
+    } finally {
+      agent.destroy();
+    }
+    expect(cleared).toBe(true);
+    expect(updatedTo).toBe('recovered');
+    expect(events).toContainEqual({ type: 'text_delta', text: 'on:recovered' });
+  });
+
   it('rejects with a timeout error when initialize never responds', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'craft-acp-init-timeout-'));
     const scriptPath = join(dir, 'fixture-acp-init-timeout.mjs');

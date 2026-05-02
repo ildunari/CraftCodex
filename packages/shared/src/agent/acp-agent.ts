@@ -201,10 +201,25 @@ export class AcpAgent extends BaseAgent {
   constructor(config: BackendConfig) {
     super(config, config.model || '');
     this._supportsBranching = false;
+    // Seed the ACP session ID from persisted state so we can attempt
+    // session/load on the very first chat() after a process restart.
+    if (config.session?.acpSessionId) {
+      this.acpSessionId = config.session.acpSessionId;
+    }
     if (!config.isHeadless) {
       this.startConfigWatcher();
     }
   }
+
+  private static readonly RESPAWN_DELAYS_MS = [250, 500, 1_000, 2_000, 5_000] as const;
+  private respawnAttempts = 0;
+  /**
+   * True when the *current* subprocess has answered `session/load` or
+   * `session/new` for our `acpSessionId`. A surviving acpSessionId in
+   * memory after a crash does NOT count — we must (re)establish the
+   * session against the freshly spawned process.
+   */
+  private sessionEstablished = false;
 
   protected async *chatImpl(
     message: string,
@@ -253,7 +268,13 @@ export class AcpAgent extends BaseAgent {
 
       yield* this.eventQueue.drain();
       await done;
+      // Successful turn — clear the respawn back-off counter so the next
+      // crash gets a fresh budget.
+      this.respawnAttempts = 0;
     } catch (error) {
+      // Spawn / initialize / session-setup failure — bump the back-off
+      // counter so the next chat() waits before trying again.
+      this.respawnAttempts += 1;
       if (!this.abortReason) {
         yield { type: 'error', message: error instanceof Error ? error.message : String(error) };
       }
@@ -405,6 +426,17 @@ export class AcpAgent extends BaseAgent {
       return;
     }
 
+    // Bounded back-off when the previous spawn failed; reset to attempt 0
+    // on a successful turn (handled at end of chatImpl).
+    if (this.respawnAttempts > 0) {
+      const idx = Math.min(this.respawnAttempts - 1, AcpAgent.RESPAWN_DELAYS_MS.length - 1);
+      const delay = AcpAgent.RESPAWN_DELAYS_MS[idx]!;
+      if (this.respawnAttempts > AcpAgent.RESPAWN_DELAYS_MS.length) {
+        throw new Error(`ACP backend unavailable after ${this.respawnAttempts - 1} respawn attempts`);
+      }
+      await new Promise((res) => setTimeout(res, delay));
+    }
+
     this.spawnSubprocess();
     this.initialized = withTimeout(
       this.sendRequest('initialize', {
@@ -462,7 +494,8 @@ export class AcpAgent extends BaseAgent {
         this.eventQueue.enqueue({ type: 'error', message: error.message });
       }
       this.eventQueue.complete();
-      this.resetSubprocessState();
+      // Keep acpSessionId so the next chat() can attempt session/load.
+      this.resetSubprocessState({ clearSessionId: false });
     });
 
     child.on('error', (error) => {
@@ -470,12 +503,47 @@ export class AcpAgent extends BaseAgent {
       this.pending.clear();
       this.eventQueue.enqueue({ type: 'error', message: `ACP subprocess error: ${error.message}` });
       this.eventQueue.complete();
-      this.resetSubprocessState();
+      this.resetSubprocessState({ clearSessionId: false });
     });
   }
 
   private async ensureSession(): Promise<void> {
-    if (this.acpSessionId) return;
+    // Established against the *current* subprocess — nothing to do.
+    if (this.sessionEstablished && this.subprocess) return;
+
+    const candidate = this.acpSessionId;
+    const supportsLoad = !!this.agentCapabilities?.loadSession;
+
+    // Try session/load when the agent advertises support and we have a
+    // saved session id (either from the previous process or from
+    // persisted SessionConfig.acpSessionId seeded in the ctor).
+    if (candidate && supportsLoad) {
+      try {
+        await withTimeout(
+          this.sendRequest('session/load', {
+            sessionId: candidate,
+            cwd: this.resolvedCwd(),
+            mcpServers: normalizeAcpMcpServers(this.config.initialSources?.mcpServers),
+            _meta: this.buildSessionInitMeta(),
+          }),
+          this.getRequestTimeoutMs('sessionLoad'),
+          'session/load',
+        );
+        // Loaded successfully — reuse the saved id.
+        this.acpSessionId = candidate;
+        this.sessionEstablished = true;
+        // Re-prime systemContext for this first turn after load; the
+        // freshly spawned agent process needs it once.
+        this.firstTurnInSession = true;
+        return;
+      } catch (error) {
+        // Stale or rejected — discard the saved id and fall through to
+        // session/new. Notify the host so persisted state matches reality.
+        this.debug(`session/load failed for ${candidate}; falling back to session/new (${(error as Error).message})`);
+        this.acpSessionId = null;
+        this.config.onAcpSessionIdCleared?.();
+      }
+    }
 
     const result = await withTimeout(
       this.sendRequest('session/new', {
@@ -487,10 +555,13 @@ export class AcpAgent extends BaseAgent {
       'session/new',
     );
 
-    this.acpSessionId = this.extractSessionId(result) || this.config.session?.id || this._sessionId;
-    // A freshly created session needs systemContext on its first prompt;
-    // subsequent prompts reuse the agent's in-memory history.
+    const newId = this.extractSessionId(result) || this.config.session?.id || this._sessionId;
+    this.acpSessionId = newId;
+    this.sessionEstablished = true;
     this.firstTurnInSession = true;
+    if (newId && newId !== candidate) {
+      this.config.onAcpSessionIdUpdate?.(newId);
+    }
   }
 
   /**
@@ -830,14 +901,22 @@ export class AcpAgent extends BaseAgent {
     this.pending.clear();
     this.readline?.close();
     this.subprocess?.kill();
-    this.resetSubprocessState();
+    this.resetSubprocessState({ clearSessionId: true });
   }
 
-  private resetSubprocessState(): void {
+  /**
+   * Reset subprocess-bound state so the next chat() can spawn fresh.
+   *
+   * @param clearSessionId When true (destroy/abort), forget the saved
+   *   acpSessionId. When false (crash recovery), keep it so the next
+   *   chat() can attempt session/load if the agent supports it.
+   */
+  private resetSubprocessState(options: { clearSessionId: boolean }): void {
     this.readline = null;
     this.subprocess = null;
     this.initialized = null;
-    this.acpSessionId = null;
+    this.sessionEstablished = false;
+    if (options.clearSessionId) this.acpSessionId = null;
   }
 
   private resolvedCwd(): string {
