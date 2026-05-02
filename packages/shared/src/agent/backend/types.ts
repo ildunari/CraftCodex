@@ -59,6 +59,18 @@ export type PermissionRequestType = 'bash' | 'file_write' | 'mcp_mutation' | 'ap
  * Permission request callback signature.
  * Called when a tool requires user permission before execution.
  */
+/**
+ * ACP-spec PermissionOption forwarded to the UI layer when the agent
+ * advertises explicit allow/reject choices. Optional — UI may ignore and
+ * keep using the binary allow/alwaysAllow boolean response, in which case
+ * the backend will infer an `optionId` itself via `pickOptionId`.
+ */
+export interface AcpPermissionOption {
+  optionId: string;
+  name: string;
+  kind: 'allow_once' | 'allow_always' | 'reject_once' | 'reject_always';
+}
+
 export type PermissionCallback = (request: {
   requestId: string;
   toolName: string;
@@ -72,6 +84,8 @@ export type PermissionCallback = (request: {
   rememberForMinutes?: number;
   commandHash?: string;
   approvalTtlSeconds?: number;
+  /** ACP agent-supplied option list (when present, UI may render directly). */
+  options?: AcpPermissionOption[];
 }) => void;
 
 /**
@@ -215,6 +229,12 @@ export interface CoreBackendConfig {
 
   /** Callback when SDK session ID is cleared (e.g., after failed resume) */
   onSdkSessionIdCleared?: () => void;
+
+  /** Callback when the ACP backend captures or refreshes its session ID. */
+  onAcpSessionIdUpdate?: (acpSessionId: string) => void;
+
+  /** Callback when a previously captured ACP session ID is invalidated. */
+  onAcpSessionIdCleared?: () => void;
 
   /** Callback to get recent messages for recovery context */
   getRecoveryMessages?: () => RecoveryMessage[];
@@ -567,8 +587,11 @@ export interface AgentBackend {
    * @param requestId - Permission request ID
    * @param allowed - Whether permission was granted
    * @param alwaysAllow - Whether to remember this permission for session
+   * @param optionId - ACP-specific: the agent-supplied option the user picked.
+   *   Optional — backends without an explicit option list ignore it; the ACP
+   *   backend infers an option from `allowed`/`alwaysAllow` when omitted.
    */
-  respondToPermission(requestId: string, allowed: boolean, alwaysAllow?: boolean): void;
+  respondToPermission(requestId: string, allowed: boolean, alwaysAllow?: boolean, optionId?: string): void;
 
   // ============================================================
   // Callbacks (set by facade after construction)

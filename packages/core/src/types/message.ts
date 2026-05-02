@@ -572,7 +572,13 @@ export type AgentEvent =
   | { type: 'shell_killed'; shellId: string; turnId?: string }
   | { type: 'source_activated'; sourceSlug: string; originalMessage: string }
   | { type: 'usage_update'; usage: Pick<AgentEventUsage, 'inputTokens' | 'contextWindow'> }
-  | { type: 'steer_undelivered'; message: string };
+  | { type: 'steer_undelivered'; message: string }
+  | { type: 'thinking'; text: string; turnId?: string }
+  | {
+      type: 'stop_reason';
+      reason: 'end_turn' | 'max_tokens' | 'max_turn_requests' | 'refusal' | 'cancelled';
+      turnId?: string;
+    };
 
 /**
  * Generate a unique message ID
