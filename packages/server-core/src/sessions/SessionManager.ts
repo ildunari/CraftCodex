@@ -5994,8 +5994,8 @@ export class SessionManager implements ISessionManager {
         }
       }
 
-      sessionLog.info(`Permission response for ${requestId}: allowed=${allowed}, alwaysAllow=${alwaysAllow}`)
-      managed.agent.respondToPermission(requestId, allowed, alwaysAllow)
+      sessionLog.info(`Permission response for ${requestId}: allowed=${allowed}, alwaysAllow=${alwaysAllow}${options?.optionId ? `, optionId=${options.optionId}` : ''}`)
+      managed.agent.respondToPermission(requestId, allowed, alwaysAllow, options?.optionId)
       return true
     } else {
       sessionLog.warn(`Cannot respond to permission - no agent for session ${sessionId}`)

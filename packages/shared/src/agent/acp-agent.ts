@@ -21,7 +21,7 @@ import { EventQueue } from './backend/event-queue.ts';
 import { getBackendRuntime } from './backend/internal/driver-types.ts';
 import { getSystemPrompt } from '../prompts/system.ts';
 import { getSessionPlansPath } from '../sessions/storage.ts';
-import type { AgentCapabilities, PermissionOption, PromptCapabilities } from './acp/acp-types.ts';
+import { normalizeAgentCapabilities, type AgentCapabilities, type PermissionOption, type PromptCapabilities } from './acp/acp-types.ts';
 import { buildPromptContent, extractAcpText as helperExtractAcpText, walkContentBlocks } from './acp/acp-content.ts';
 import {
   buildPermissionResponse,
@@ -289,6 +289,12 @@ export class AcpAgent extends BaseAgent {
         if (reason) {
           this.eventQueue.enqueue({ type: 'stop_reason', reason });
         }
+
+        // Successful turn — clear the respawn back-off counter inside
+        // `done` so the reset happens even when the consumer breaks out
+        // of the for-await early (the generator's finally would skip
+        // any code positioned after `await done`).
+        this.respawnAttempts = 0;
       }).catch((error) => {
         if (this.abortReason) return;
         this.eventQueue.enqueue({ type: 'error', message: error.message });
@@ -297,10 +303,10 @@ export class AcpAgent extends BaseAgent {
       });
 
       yield* this.eventQueue.drain();
+      // `done` may already be settled (because `complete()` ran in its
+      // finally), but await it anyway so any synchronous post-stream
+      // work is observable to the caller.
       await done;
-      // Successful turn — clear the respawn back-off counter so the next
-      // crash gets a fresh budget.
-      this.respawnAttempts = 0;
     } catch (error) {
       // Spawn / initialize / session-setup failure — bump the back-off
       // counter so the next chat() waits before trying again.
@@ -403,9 +409,13 @@ export class AcpAgent extends BaseAgent {
    * Cancel + graceful kill chain.
    *
    * Sequence (bounded):
-   *  1) Send `session/cancel` — wait up to `sessionCancel` timeout for ack.
-   *  2) If the subprocess is still alive, send SIGTERM and wait `cancelTermGraceMs`.
-   *  3) If still alive, send SIGKILL.
+   *  1) Send `session/cancel` as an ACP notification (no id) — this is the
+   *     spec shape; expecting a response would make strict servers reply
+   *     "method not found".
+   *  2) Wait up to `sessionCancel` timeout for the in-flight session/prompt
+   *     to settle (the agent should return `stopReason: 'cancelled'`).
+   *  3) If still alive, send SIGTERM and wait `cancelTermGraceMs`.
+   *  4) If still alive, send SIGKILL.
    *
    * Each step is a no-op if the subprocess has already exited.
    */
@@ -416,13 +426,39 @@ export class AcpAgent extends BaseAgent {
     const sessionId = this.acpSessionId;
     if (sessionId) {
       try {
-        await withTimeout(
-          this.sendRequest('session/cancel', { sessionId }),
-          this.getRequestTimeoutMs('sessionCancel'),
-          'session/cancel',
-        );
+        this.writeMessage({
+          jsonrpc: '2.0',
+          method: 'session/cancel',
+          params: { sessionId },
+        });
       } catch {
-        // Cancel timed out or errored — fall through to kill chain.
+        // Stdin closed before we could write — fall through to kill.
+      }
+
+      // Briefly wait for the agent to acknowledge by exiting or by
+      // settling its in-flight prompt. Bounded by the same budget as
+      // the previous request-style cancel.
+      const cancelDeadline = this.getRequestTimeoutMs('sessionCancel');
+      if (cancelDeadline > 0) {
+        await new Promise<void>((resolve) => {
+          if (this.pending.size === 0 || child.exitCode != null || child.signalCode != null) {
+            resolve();
+            return;
+          }
+          const timer = setTimeout(resolve, cancelDeadline);
+          const onExit = () => { clearTimeout(timer); resolve(); };
+          child.once('exit', onExit);
+          // If all in-flight RPCs settle (the prompt rejected with
+          // cancelled), proceed early without waiting the full budget.
+          const tick = setInterval(() => {
+            if (this.pending.size === 0) {
+              clearInterval(tick);
+              clearTimeout(timer);
+              child.removeListener('exit', onExit);
+              resolve();
+            }
+          }, 50);
+        });
       }
     }
 
@@ -490,10 +526,20 @@ export class AcpAgent extends BaseAgent {
       'initialize',
     ).then((result) => {
       const caps = asRecord(asRecord(result)?.agentCapabilities ?? asRecord(result)?.capabilities);
-      this.agentCapabilities = caps as AgentCapabilities | null;
+      this.agentCapabilities = normalizeAgentCapabilities(caps);
     });
 
-    await this.initialized;
+    try {
+      await this.initialized;
+    } catch (error) {
+      // Initialize failed (timeout, JSON-RPC error, ...). Without this
+      // cleanup the subprocess stays alive and `this.initialized` keeps
+      // its rejected promise, so the next chat() finds
+      // `subprocess && initialized` truthy at the top of ensureSubprocess
+      // and re-throws the cached rejection forever.
+      this.killSubprocess();
+      throw error;
+    }
   }
 
   private spawnSubprocess(): void {
@@ -523,10 +569,22 @@ export class AcpAgent extends BaseAgent {
     });
 
     child.on('exit', (code, signal) => {
+      // Stale handler: if we've already torn this subprocess down (e.g.
+      // killSubprocess() ran during recovery and a new subprocess is now
+      // active), the captured `child` is no longer authoritative. Don't
+      // touch the event queue or the active turn's state.
+      if (this.subprocess !== child) return;
       const error = new Error(`ACP subprocess exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})`);
       for (const pending of this.pending.values()) pending.reject(error);
       this.pending.clear();
-      if (this._isProcessing && !this.abortReason) {
+      if (this.abortReason) {
+        // Exit during a graceful shutdown — `forceAbort` will complete
+        // the queue once the kill chain settles. Don't double-emit
+        // error events or race with that path.
+        this.resetSubprocessState({ clearSessionId: false });
+        return;
+      }
+      if (this._isProcessing) {
         this.eventQueue.enqueue({ type: 'error', message: error.message });
       }
       this.eventQueue.complete();
@@ -535,8 +593,13 @@ export class AcpAgent extends BaseAgent {
     });
 
     child.on('error', (error) => {
+      if (this.subprocess !== child) return;
       for (const pending of this.pending.values()) pending.reject(error);
       this.pending.clear();
+      if (this.abortReason) {
+        this.resetSubprocessState({ clearSessionId: false });
+        return;
+      }
       this.eventQueue.enqueue({ type: 'error', message: `ACP subprocess error: ${error.message}` });
       this.eventQueue.complete();
       this.resetSubprocessState({ clearSessionId: false });
@@ -873,14 +936,17 @@ export class AcpAgent extends BaseAgent {
       return;
     }
 
-    // Legacy / non-spec server: keep emitting the historical payload so we
-    // don't regress agents that didn't send an `options` list. They get
-    // both a spec-shaped envelope and the legacy `allowed`/`decision` fields.
+    // Legacy / non-spec server: emit the historical { allowed, decision }
+    // payload so we don't regress agents that didn't send an `options`
+    // list. We deliberately do NOT fabricate an `optionId: 'allow'` here:
+    // a strict spec-compliant server would reject it because no such
+    // option was ever offered. The `outcome` field is also omitted so
+    // the agent can choose the legacy or spec parser based on the keys
+    // that are present.
     this.writeMessage({
       jsonrpc: '2.0',
       id: message.id,
       result: {
-        outcome: { outcome: decision.allowed ? 'selected' : 'cancelled', optionId: decision.allowed ? 'allow' : undefined },
         allowed: decision.allowed,
         decision: decision.allowed ? 'accept' : 'decline',
       },

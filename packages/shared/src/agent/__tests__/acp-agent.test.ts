@@ -643,4 +643,145 @@ rl.on('line', () => { /* swallow forever */ });
     expect(errEvents.length).toBeGreaterThan(0);
     expect(errEvents[0].message).toContain('initialize timed out');
   });
+
+  it('recovers cleanly from an initialize timeout — next chat() can succeed', async () => {
+    // Phase H regression for HIGH #2: previously, a timed-out initialize
+    // left this.subprocess + this.initialized populated with a cached
+    // rejection, so every subsequent chat() saw `subprocess && initialized`
+    // truthy and re-threw the same error forever.
+    const dir = await mkdtemp(join(tmpdir(), 'craft-acp-init-recover-'));
+    const wedgedPath = join(dir, 'fixture-wedged.mjs');
+    const healthyPath = join(dir, 'fixture-healthy.mjs');
+    await writeFile(wedgedPath, `
+import readline from 'node:readline';
+const rl = readline.createInterface({ input: process.stdin });
+rl.on('line', () => { /* swallow forever */ });
+`, 'utf8');
+    await writeFile(healthyPath, `
+import readline from 'node:readline';
+const rl = readline.createInterface({ input: process.stdin });
+function send(value) { process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n'); }
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') return send({ id: msg.id, result: { protocolVersion: 1 } });
+  if (msg.method === 'session/new') return send({ id: msg.id, result: { sessionId: 's-rec' } });
+  if (msg.method === 'session/prompt') {
+    send({ method: 'session/update', params: { sessionId: 's-rec', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'recovered' } } } });
+    return send({ id: msg.id, result: { stopReason: 'end_turn' } });
+  }
+});
+`, 'utf8');
+    const config = createConfig(wedgedPath);
+    config.runtime = { ...(config.runtime ?? {}), acpRequestTimeoutMs: { initialize: 200 } };
+    const agent = new AcpAgent(config);
+    try {
+      // First chat — initialize times out.
+      const events1: any[] = [];
+      for await (const event of agent.chat('first')) events1.push(event);
+      expect(events1.some(e => e.type === 'error' && /initialize timed out/.test(e.message))).toBe(true);
+
+      // Swap the runtime to a healthy fixture and try again — must succeed,
+      // not re-throw the cached failure.
+      (config.runtime as any).acpCommand = process.execPath;
+      (config.runtime as any).acpArgs = [healthyPath];
+      const events2: any[] = [];
+      for await (const event of agent.chat('second')) events2.push(event);
+      expect(events2).toContainEqual({ type: 'text_delta', text: 'recovered' });
+    } finally {
+      agent.destroy();
+    }
+  });
+
+  it('does not double-emit an error event when the subprocess exits during abort', async () => {
+    // Phase H regression for HIGH #4: the subprocess exit handler used
+    // to enqueue { type: 'error' } even when forceAbort had set
+    // abortReason — the consumer then saw a stale error after the
+    // graceful cancel completed.
+    const dir = await mkdtemp(join(tmpdir(), 'craft-acp-abort-race-'));
+    const scriptPath = join(dir, 'fixture-acp-abort-race.mjs');
+    await writeFile(scriptPath, `
+import readline from 'node:readline';
+const rl = readline.createInterface({ input: process.stdin });
+function send(value) { process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n'); }
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') return send({ id: msg.id, result: { protocolVersion: 1 } });
+  if (msg.method === 'session/new') return send({ id: msg.id, result: { sessionId: 's-ab' } });
+  if (msg.method === 'session/prompt') {
+    // Stream forever (until we get cancelled).
+    setInterval(() => {
+      send({ method: 'session/update', params: { sessionId: 's-ab', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '.' } } } });
+    }, 20);
+    return;
+  }
+  if (msg.method === 'session/cancel') {
+    // Spec says cancel is a notification — no response. Exit shortly to
+    // simulate the agent shutting down gracefully.
+    setTimeout(() => process.exit(0), 50);
+  }
+});
+`, 'utf8');
+    const config = createConfig(scriptPath);
+    config.runtime = { ...(config.runtime ?? {}), acpRequestTimeoutMs: { sessionCancel: 300 }, acpCancelTermGraceMs: 200 };
+    const agent = new AcpAgent(config);
+    const events: any[] = [];
+    const drain = (async () => {
+      for await (const event of agent.chat('stream forever')) events.push(event);
+    })();
+
+    // Let the stream get going, then abort.
+    await new Promise(r => setTimeout(r, 100));
+    await agent.abort();
+    await drain;
+    agent.destroy();
+
+    const errors = events.filter(e => e.type === 'error');
+    expect(errors).toEqual([]);
+  });
+
+  it('legacy permission response omits the spec outcome envelope', async () => {
+    // Phase H regression for MEDIUM #6: the legacy non-spec server path
+    // used to fabricate { outcome: { outcome: 'selected', optionId: 'allow' } }
+    // even though no such option was ever offered.
+    const dir = await mkdtemp(join(tmpdir(), 'craft-acp-legacy-perm-'));
+    const scriptPath = join(dir, 'fixture-acp-legacy-perm.mjs');
+    await writeFile(scriptPath, `
+import readline from 'node:readline';
+const rl = readline.createInterface({ input: process.stdin });
+let promptId = null;
+let approvalEcho = null;
+function send(value) { process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n'); }
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') return send({ id: msg.id, result: { protocolVersion: 1 } });
+  if (msg.method === 'session/new') return send({ id: msg.id, result: { sessionId: 's-leg' } });
+  if (msg.method === 'session/prompt') {
+    promptId = msg.id;
+    return send({ id: 'leg-1', method: 'permission/request', params: { toolName: 'Bash', command: 'echo' } });
+  }
+  if (msg.id === 'leg-1') {
+    approvalEcho = msg.result;
+    send({ method: 'session/update', params: { sessionId: 's-leg', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'echo:' + JSON.stringify(approvalEcho) } } } });
+    send({ id: promptId, result: { stopReason: 'end_turn' } });
+  }
+});
+`, 'utf8');
+    const agent = new AcpAgent(createConfig(scriptPath));
+    agent.onPermissionRequest = (request) => {
+      agent.respondToPermission(request.requestId, true);
+    };
+    const events: any[] = [];
+    try {
+      for await (const event of agent.chat('do it')) events.push(event);
+    } finally {
+      agent.destroy();
+    }
+    const echoed = events.find(e => e.type === 'text_delta' && typeof e.text === 'string' && e.text.startsWith('echo:'))?.text as string | undefined;
+    expect(echoed).toBeDefined();
+    const payload = JSON.parse(echoed!.slice('echo:'.length));
+    // Legacy fields preserved...
+    expect(payload).toEqual({ allowed: true, decision: 'accept' });
+    // ...and we never fabricated an `optionId: 'allow'`.
+    expect(payload.outcome).toBeUndefined();
+  });
 });
