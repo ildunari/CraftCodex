@@ -145,7 +145,6 @@ autoUpdater.on('checking-for-update', () => {
 autoUpdater.on('update-available', (info) => {
   mainLog.info(`[auto-update] Update available: ${updateInfo.currentVersion} → ${info.version}`)
 
-  // First, check electron-updater's internal state (most reliable)
   const internalState = checkElectronUpdaterState()
   if (internalState.ready) {
     mainLog.info(`[auto-update] electron-updater reports download ready`)
@@ -160,19 +159,12 @@ autoUpdater.on('update-available', (info) => {
     return
   }
 
-  // Fallback: check if file exists in cache directory
+  // Cache files by themselves are not enough for install. quitAndInstall()
+  // only works once electron-updater has validated the download and populated
+  // downloadedUpdateHelper. Treat loose cache files as diagnostics, not ready.
   const existing = checkForExistingDownload()
   if (existing.exists) {
-    mainLog.info(`[auto-update] Update already downloaded (file check), setting state to ready`)
-    updateInfo = {
-      ...updateInfo,
-      available: true,
-      latestVersion: info.version,
-      downloadState: 'ready',
-      downloadProgress: 100,
-    }
-    broadcastUpdateInfo()
-    return
+    mainLog.warn('[auto-update] Found cached update files but electron-updater has not validated them; continuing download')
   }
 
   updateInfo = {
@@ -349,24 +341,13 @@ export async function checkForUpdates(options: CheckOptions = {}): Promise<Updat
     // Check for updates - this returns a promise that resolves with the check result
     const result = await autoUpdater.checkForUpdates()
 
-    // If update is available and was already downloaded, the update-downloaded event
-    // should fire. Wait a moment for events to settle before returning.
+    // If update is available and was already downloaded, electron-updater should
+    // fire update-downloaded. Wait a moment for events to settle before returning.
     if (result?.updateInfo) {
-      // Give electron-updater time to fire update-downloaded if file exists
       await new Promise(resolve => setTimeout(resolve, 500))
 
-      // Double-check: if we're still showing 'downloading' but file exists, update state
-      if (updateInfo.downloadState === 'downloading') {
-        const existing = checkForExistingDownload()
-        if (existing.exists) {
-          mainLog.info('[auto-update] Update already downloaded, updating state to ready')
-          updateInfo = {
-            ...updateInfo,
-            downloadState: 'ready',
-            downloadProgress: 100,
-          }
-          broadcastUpdateInfo()
-        }
+      if (updateInfo.downloadState === 'downloading' && checkForExistingDownload().exists) {
+        mainLog.warn('[auto-update] Cached update file exists, but validated update helper is not ready yet')
       }
     }
   } catch (error) {
@@ -382,6 +363,51 @@ export async function checkForUpdates(options: CheckOptions = {}): Promise<Updat
   }
 
   return getUpdateInfo()
+}
+
+async function waitForValidatedUpdateReady(timeoutMs = 60_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+
+  while (Date.now() < deadline) {
+    if (checkElectronUpdaterState().ready) return true
+    if (updateInfo.downloadState === 'error') return false
+    await new Promise(resolve => setTimeout(resolve, 500))
+  }
+
+  return checkElectronUpdaterState().ready
+}
+
+async function ensureValidatedUpdateReady(): Promise<void> {
+  if (checkElectronUpdaterState().ready) return
+
+  mainLog.warn('[auto-update] Install requested without a validated pending update; refreshing download state')
+  updateInfo = {
+    ...updateInfo,
+    downloadState: 'downloading',
+    downloadProgress: Math.max(updateInfo.downloadProgress, 0),
+    error: undefined,
+  }
+  broadcastUpdateInfo()
+
+  try {
+    await autoUpdater.downloadUpdate()
+  } catch (downloadError) {
+    mainLog.warn('[auto-update] downloadUpdate did not start directly; rechecking for updates', downloadError)
+    await checkForUpdates({ autoDownload: true })
+  }
+
+  const ready = await waitForValidatedUpdateReady()
+  if (!ready) {
+    const message = 'Update download was not validated by Electron. Check for updates again before restarting.'
+    mainLog.error('[auto-update]', message)
+    updateInfo = {
+      ...updateInfo,
+      downloadState: 'error',
+      error: message,
+    }
+    broadcastUpdateInfo()
+    throw new Error(message)
+  }
 }
 
 /**
@@ -409,6 +435,11 @@ export async function installUpdate(): Promise<void> {
   __isUpdating = true
 
   try {
+    await ensureValidatedUpdateReady()
+
+    updateInfo = { ...updateInfo, downloadState: 'installing', downloadProgress: 100 }
+    broadcastUpdateInfo()
+
     // isSilent=false shows the installer UI on Windows if needed (fallback)
     // isForceRunAfter=true ensures the app relaunches after install
     autoUpdater.quitAndInstall(false, true)

@@ -127,6 +127,33 @@ import { sanitizeForTitle, shouldActivateBrowserOverlay, normalizeBrowserToolNam
 import { resizeImageForAPI, resizeIconBuffer } from '@craft-agent/server-core/services'
 export { sanitizeForTitle }
 
+function normalizeAssistantCompleteText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+export function shouldSkipDuplicateAssistantComplete(
+  messages: Message[],
+  event: Extract<AgentEvent, { type: 'text_complete' }>,
+): boolean {
+  const eventText = normalizeAssistantCompleteText(event.text)
+  if (!eventText) return false
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]
+    if (message.role !== 'assistant') continue
+    if (Boolean(message.isIntermediate) !== Boolean(event.isIntermediate)) continue
+    if (normalizeAssistantCompleteText(message.content) !== eventText) continue
+
+    if (event.turnId) {
+      return message.turnId === event.turnId
+    }
+
+    return i === messages.length - 1
+  }
+
+  return false
+}
+
 // Module-level platform ref — set once during init via setSessionPlatform()
 let _platform: PlatformServices | null = null
 
@@ -6289,6 +6316,16 @@ export class SessionManager implements ISessionManager {
       case 'text_complete': {
         // Flush any pending deltas before sending complete (ensures renderer has all content)
         this.flushDelta(sessionId, workspaceId)
+
+        if (shouldSkipDuplicateAssistantComplete(managed.messages, event)) {
+          sessionLog.info('Skipping duplicate assistant text_complete', {
+            sessionId,
+            turnId: event.turnId,
+            isIntermediate: event.isIntermediate,
+          })
+          managed.streamingText = ''
+          break
+        }
 
         const assistantMessage: Message = {
           id: generateMessageId(),

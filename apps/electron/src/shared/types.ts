@@ -626,7 +626,7 @@ export interface ElectronAPI {
   deleteLlmConnection(slug: string): Promise<{ success: boolean; error?: string }>
   testLlmConnection(slug: string): Promise<{ success: boolean; error?: string }>
   setDefaultLlmConnection(slug: string): Promise<{ success: boolean; error?: string }>
-  listAgentCatalog(): Promise<AgentCatalogStatus[]>
+  listAgentCatalog(options?: { forceRefresh?: boolean }): Promise<AgentCatalogStatus[]>
   enableAgent(agentId: string): Promise<AgentCatalogActionResult>
   openAgentSetup(agentId: string): Promise<AgentCatalogActionResult>
   saveAgentApiKey(agentId: string, apiKey: string): Promise<AgentCatalogActionResult>

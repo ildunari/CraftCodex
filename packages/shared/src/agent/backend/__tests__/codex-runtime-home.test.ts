@@ -91,4 +91,32 @@ describe('prepareCodexRuntimeHome', () => {
 
     await rm(rootHome, { recursive: true, force: true });
   });
+
+  it('adds the catalog model provider for custom Codex models', async () => {
+    const rootHome = await mkdtemp(join(tmpdir(), 'craft-root-codex-'));
+    process.env.CRAFT_ROOT_CODEX_HOME = rootHome;
+    const catalogPath = join(rootHome, 'model-catalog.json');
+    await writeFile(catalogPath, JSON.stringify({
+      models: [
+        { slug: 'gpt-5.5', display_name: 'GPT-5.5' },
+        { slug: 'glm-5.1', display_name: 'GLM-5.1', model_provider: 'go-llm-proxy-vibe' },
+      ],
+    }), 'utf8');
+    await writeFile(join(rootHome, 'config.toml'), [
+      'model = "gpt-5.5"',
+      `model_catalog_json = "${catalogPath}"`,
+    ].join('\n'), 'utf8');
+
+    const result = await prepareCodexRuntimeHome({
+      connectionSlug: 'runtime-home-test',
+      model: 'glm-5.1',
+    });
+    const generated = await readFile(join(result.runtimeHome, 'config.toml'), 'utf8');
+
+    expect(generated).toContain('model_provider = "go-llm-proxy-vibe"');
+    expect(generated.indexOf('model_provider = "go-llm-proxy-vibe"')).toBeLessThan(generated.indexOf('[features]'));
+    expect(result.configOverrides.model_provider).toBe('go-llm-proxy-vibe');
+
+    await rm(rootHome, { recursive: true, force: true });
+  });
 });

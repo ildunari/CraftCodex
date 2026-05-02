@@ -82,7 +82,7 @@ extraMetadata:
 # Auto-update: electron-updater fetches from this URL for update manifests (.yml files)
 publish:
   provider: generic
-  url: https://agents.craft.do/electron/latest
+  url: https://github.com/ildunari/craft-agents-oss/releases/download/craftcodex-latest
 
 # Disable ASAR to avoid decompression overhead and click delays
 asar: false

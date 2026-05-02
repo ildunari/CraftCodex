@@ -662,7 +662,7 @@ export default function AiSettingsPage() {
   const [renamingConnection, setRenamingConnection] = useState<{ slug: string; name: string } | null>(null)
   const [renameValue, setRenameValue] = useState('')
 
-  const loadAgentCatalog = useCallback(async () => {
+  const loadAgentCatalog = useCallback(async (options: { forceRefresh?: boolean; refreshAfterCache?: boolean } = {}) => {
     if (!window.electronAPI?.listAgentCatalog) {
       setAgentCatalogLoading(false)
       setAgentCatalogError('This CraftCodex build does not expose local agent management. Restart the latest app build and try again.')
@@ -671,7 +671,13 @@ export default function AiSettingsPage() {
     setAgentCatalogLoading(true)
     setAgentCatalogError(null)
     try {
-      setAgentCatalog(await withAgentCatalogTimeout(window.electronAPI.listAgentCatalog()))
+      const catalog = await withAgentCatalogTimeout(window.electronAPI.listAgentCatalog({ forceRefresh: options.forceRefresh }))
+      setAgentCatalog(catalog)
+      if (options.refreshAfterCache && !options.forceRefresh) {
+        void window.electronAPI.listAgentCatalog({ forceRefresh: true })
+          .then(setAgentCatalog)
+          .catch(error => console.warn('Background agent catalog refresh failed:', error))
+      }
     } catch (error) {
       console.error('Failed to load agent catalog:', error)
       setAgentCatalog([])
@@ -688,7 +694,7 @@ export default function AiSettingsPage() {
       try {
         const ws = await window.electronAPI.getWorkspaces()
         setWorkspaces(ws)
-        await loadAgentCatalog()
+        await loadAgentCatalog({ refreshAfterCache: true })
 
         const defaultThinkingLevel = await window.electronAPI.getDefaultThinkingLevel()
         setDefaultThinking(defaultThinkingLevel)
@@ -993,7 +999,7 @@ export default function AiSettingsPage() {
       if (result.success) {
         if (result.message) toast.success(result.message)
         await refreshLlmConnections?.()
-        await loadAgentCatalog()
+        await loadAgentCatalog({ forceRefresh: true })
       } else {
         toast.error(result.error || 'Agent action failed')
       }
@@ -1039,7 +1045,7 @@ export default function AiSettingsPage() {
       setDroidApiKey('')
       setDroidApiKeyOpen(false)
       await refreshLlmConnections?.()
-      await loadAgentCatalog()
+      await loadAgentCatalog({ forceRefresh: true })
       if (result.connectionSlug && window.electronAPI?.testLlmConnection) {
         const testResult = await window.electronAPI.testLlmConnection(result.connectionSlug)
         if (!testResult.success) {
@@ -1060,7 +1066,7 @@ export default function AiSettingsPage() {
         const result = await window.electronAPI.testLlmConnection(agent.connectionSlug)
         if (!result.success) return { success: false, error: result.error }
       }
-      await loadAgentCatalog()
+      await loadAgentCatalog({ forceRefresh: true })
       return { success: true }
     })
   }, [loadAgentCatalog, runAgentAction])
@@ -1106,7 +1112,7 @@ export default function AiSettingsPage() {
                         <p className="font-medium text-foreground">Could not load local agents</p>
                         <p className="mt-1">{agentCatalogError}</p>
                       </div>
-                      <Button variant="outline" size="sm" onClick={() => void loadAgentCatalog()}>
+                      <Button variant="outline" size="sm" onClick={() => void loadAgentCatalog({ forceRefresh: true })}>
                         <RefreshCcw className="mr-1.5 h-3.5 w-3.5" />
                         Retry
                       </Button>

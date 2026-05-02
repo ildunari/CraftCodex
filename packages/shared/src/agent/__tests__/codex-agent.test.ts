@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { CodexAgent } from '../codex-agent.ts';
 import type { BackendConfig } from '../backend/types.ts';
 
-async function createFixtureCodexServer(): Promise<string> {
+async function createFixtureCodexServer(options: { duplicateTurnCompleted?: boolean } = {}): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'craft-codex-fixture-'));
   const scriptPath = join(dir, 'fixture-codex.mjs');
   await writeFile(scriptPath, `
@@ -79,6 +79,7 @@ rl.on('line', (line) => {
 	    send({ method: 'item/agentMessage/delta', params: { itemId: 'msg_fixture', delta: 'world' } });
 	    send({ method: 'thread/tokenUsage/updated', params: { threadId: 'thr_fixture', turnId: 'turn_fixture', tokenUsage: { total: { inputTokens: 123, totalTokens: 130, cachedInputTokens: 0, outputTokens: 7, reasoningOutputTokens: 0 }, last: { inputTokens: 123, totalTokens: 130, cachedInputTokens: 0, outputTokens: 7, reasoningOutputTokens: 0 }, modelContextWindow: 272000 } } });
 	    send({ method: 'turn/completed', params: { turn: { id: 'turn_fixture', status: 'completed' } } });
+	    ${options.duplicateTurnCompleted ? "send({ method: 'turn/completed', params: { turn: { id: 'turn_fixture', status: 'completed' } } });" : ''}
 	    return;
   }
   if (msg.method === 'turn/interrupt') {
@@ -163,5 +164,23 @@ describe('CodexAgent', () => {
     });
 
     expect(models).toEqual([{ id: 'gpt-5.5', name: 'GPT-5.5', contextWindow: 272000 }]);
+  });
+
+  it('emits one final text_complete if Codex repeats turn/completed', async () => {
+    const scriptPath = await createFixtureCodexServer({ duplicateTurnCompleted: true });
+    const agent = new CodexAgent(createConfig(scriptPath));
+    const events = [];
+
+    try {
+      for await (const event of agent.chat('Say hi')) {
+        events.push(event);
+      }
+    } finally {
+      agent.destroy();
+    }
+
+    expect(events.filter(event => event.type === 'text_complete')).toEqual([
+      { type: 'text_complete', text: 'hello world', turnId: 'turn_fixture' },
+    ]);
   });
 });

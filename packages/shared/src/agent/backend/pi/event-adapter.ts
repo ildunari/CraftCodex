@@ -361,8 +361,8 @@ export class PiEventAdapter extends BaseEventAdapter {
           result = this.extractToolResult(event.result, isError);
         }
 
-        // After tool completion, the assistant may generate new text
-        this.hasEmittedFinalText = false;
+        // Tool results close the current sub-turn. Final text emission stays
+        // closed once a final answer has already been emitted for this turn.
         this.messageSubTurnId = null;
 
         // Check if this was classified as a file read

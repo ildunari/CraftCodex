@@ -176,6 +176,24 @@ describe('connection model availability', () => {
 })
 
 describe('curated agent catalog', () => {
+  it('exposes Craft Agents Backend as the default Pi/OpenAI-Codex agent', () => {
+    const pi = AGENT_CATALOG.find(agent => agent.id === 'pi')!
+    const connection = createConnectionForAgent(pi)
+
+    expect(pi.showInAgentManager).toBe(true)
+    expect(connection).toMatchObject({
+      slug: 'craft-agents-backend',
+      name: 'Craft Agents Backend',
+      agentId: 'pi',
+      providerType: 'pi',
+      authType: 'oauth',
+      piAuthProvider: 'openai-codex',
+      defaultModel: 'pi/gpt-5.2',
+      modelSelectionMode: 'automaticallySyncedFromProvider',
+    })
+    expect(connection.slug).not.toBe('pi-api-key')
+  })
+
   it('creates Hermes as a first-party ACP-backed connection', () => {
     const hermes = AGENT_CATALOG.find(agent => agent.id === 'hermes')!
     const connection = createConnectionForAgent(hermes)

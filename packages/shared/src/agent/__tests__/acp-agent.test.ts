@@ -125,6 +125,24 @@ describe('extractAcpText', () => {
       ignored: 'nope',
     })).toEqual(['hello', ' world']);
   });
+
+  it('does not treat tool/status metadata as assistant text', () => {
+    expect(extractAcpText({
+      title: 'General Greeting',
+      summary: 'Steps Completed',
+      rawOutput: 'tool output',
+      status: 'completed',
+    })).toEqual([]);
+  });
+
+  it('extracts nested assistant message content without metadata', () => {
+    expect(extractAcpText({
+      assistant_message: {
+        title: 'General Greeting',
+        content: [{ type: 'text', text: 'Hi Kosta.' }],
+      },
+    })).toEqual(['Hi Kosta.']);
+  });
 });
 
 describe('AcpAgent', () => {

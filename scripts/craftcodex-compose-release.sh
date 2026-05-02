@@ -11,6 +11,7 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 RELEASE_BRANCH="${RELEASE_BRANCH:-${BRANCH_PREFIX}-${STAMP}}"
 UPDATE_FEED_URL="${CRAFTCODEX_UPDATE_FEED_URL:-${CRAFT_UPDATE_FEED_URL:-https://github.com/ildunari/craft-agents-oss/releases/download/craftcodex-latest}}"
 UPLOAD="${UPLOAD:-0}"
+REQUIRE_SIGNED_RELEASE="${REQUIRE_SIGNED_RELEASE:-${UPLOAD}}"
 
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "error: must run inside a git checkout" >&2
@@ -54,6 +55,24 @@ fi
 echo "Using CraftCodex update feed: ${UPDATE_FEED_URL}"
 export CRAFTCODEX_UPDATE_FEED_URL="${UPDATE_FEED_URL}"
 
+if [ "$REQUIRE_SIGNED_RELEASE" = "1" ]; then
+  if [ -z "${CSC_LINK:-}" ] && [ -z "${CSC_NAME:-}" ] && [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+    cat >&2 <<EOF
+error: signed release artifacts are required for the CraftCodex update feed.
+
+Set one of:
+  CSC_LINK
+  CSC_NAME
+  APPLE_SIGNING_IDENTITY
+
+Auto-updated macOS artifacts must be signed consistently, otherwise Electron can
+download the update but fail or no-op when Restart to Update calls quitAndInstall().
+Use REQUIRE_SIGNED_RELEASE=0 only for local, unpublished smoke builds.
+EOF
+    exit 1
+  fi
+fi
+
 echo "Running focused updater tests..."
 bun test \
   apps/electron/src/main/__tests__/auto-update-config.test.ts \
@@ -63,7 +82,7 @@ echo "Running Electron typecheck..."
 bun run typecheck:electron
 
 echo "Building CraftCodex macOS artifacts..."
-bun run electron:dist:dev:mac
+bun run electron:dist:mac
 
 if [ "$UPLOAD" = "1" ]; then
   echo "Uploading CraftCodex artifacts..."
