@@ -163,6 +163,37 @@ describe('AcpAgent', () => {
     expect(events.at(-1)).toEqual({ type: 'complete' });
   });
 
+  it('routes agent_thought_chunk content into thinking events', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'craft-acp-thinking-'));
+    const scriptPath = join(dir, 'fixture-acp-thinking.mjs');
+    await writeFile(scriptPath, `
+import readline from 'node:readline';
+const rl = readline.createInterface({ input: process.stdin });
+function send(value) { process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n'); }
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') return send({ id: msg.id, result: { protocolVersion: 1 } });
+  if (msg.method === 'session/new') return send({ id: msg.id, result: { sessionId: 's1' } });
+  if (msg.method === 'session/prompt') {
+    send({ method: 'session/update', params: { sessionId: 's1', update: { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'pondering...' } } } });
+    send({ method: 'session/update', params: { sessionId: 's1', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'answer' } } } });
+    send({ id: msg.id, result: { stopReason: 'end_turn' } });
+  }
+});
+`, 'utf8');
+    const agent = new AcpAgent(createConfig(scriptPath));
+    const events: any[] = [];
+    try {
+      for await (const event of agent.chat('Plan')) events.push(event);
+    } finally {
+      agent.destroy();
+    }
+    expect(events).toContainEqual({ type: 'thinking', text: 'pondering...' });
+    expect(events).toContainEqual({ type: 'text_delta', text: 'answer' });
+    // Thinking text must NOT leak into the assistant message stream.
+    expect(events).not.toContainEqual({ type: 'text_delta', text: 'pondering...' });
+  });
+
   it('forwards ACP permission requests through the backend permission callback', async () => {
     const scriptPath = await createFixtureAcpPermissionServer();
     const agent = new AcpAgent(createConfig(scriptPath));

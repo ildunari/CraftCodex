@@ -21,6 +21,11 @@ import { EventQueue } from './backend/event-queue.ts';
 import { getBackendRuntime } from './backend/internal/driver-types.ts';
 import { getSystemPrompt } from '../prompts/system.ts';
 import { getSessionPlansPath } from '../sessions/storage.ts';
+import type { AgentCapabilities, PromptCapabilities } from './acp/acp-types.ts';
+import { buildPromptContent, extractAcpText as helperExtractAcpText, walkContentBlocks } from './acp/acp-content.ts';
+
+/** Re-export so the existing test import (`{ extractAcpText } from '../acp-agent'`) keeps working. */
+export const extractAcpText = helperExtractAcpText;
 
 interface JsonRpcMessage {
   jsonrpc?: string;
@@ -63,10 +68,6 @@ function firstRecord(record: Record<string, unknown> | null, keys: string[]): Re
 function normalizeToolInput(value: unknown): Record<string, unknown> {
   if (asRecord(value)) return value as Record<string, unknown>;
   return {};
-}
-
-function textBlock(text: string): Array<{ type: 'text'; text: string }> {
-  return [{ type: 'text', text }];
 }
 
 function normalizeAcpMcpServers(value: unknown): unknown[] {
@@ -136,31 +137,6 @@ function isPermissionRequestMethod(method: string): boolean {
   return /permission|approval/i.test(method) && /request|ask|approve/i.test(method);
 }
 
-const TEXT_SESSION_UPDATE_KINDS = new Set([
-  'agent_message_chunk',
-  'agent_message',
-  'assistant_message_chunk',
-  'assistant_message',
-  'message_chunk',
-  'message_delta',
-  'text',
-  'text_delta',
-  'output',
-]);
-
-const STATUS_SESSION_UPDATE_KINDS = new Set([
-  'status',
-  'progress',
-  'agent_status',
-  'session_status',
-  'thinking',
-  'thinking_chunk',
-  'thought',
-  'thought_chunk',
-  'agent_thought',
-  'agent_thought_chunk',
-]);
-
 function normalizeSessionUpdateKind(value: string | undefined): string | undefined {
   return value?.trim().toLowerCase().replace(/[-\s]/g, '_');
 }
@@ -171,36 +147,6 @@ function extractAcpStatusText(update: Record<string, unknown> | null): string | 
 
   const nested = firstRecord(update, ['content', 'delta', 'progress']);
   return firstString(nested, ['message', 'text', 'status', 'summary', 'title']);
-}
-
-export function extractAcpText(value: unknown): string[] {
-  const texts: string[] = [];
-  const seen = new Set<unknown>();
-
-  const visit = (node: unknown, keyHint?: string): void => {
-    if (node == null) return;
-    if (typeof node === 'string') {
-      if (keyHint && /^(text|delta|content|message|output|summary)$/i.test(keyHint)) {
-        texts.push(node);
-      }
-      return;
-    }
-    if (typeof node !== 'object') return;
-    if (seen.has(node)) return;
-    seen.add(node);
-
-    if (Array.isArray(node)) {
-      for (const item of node) visit(item, keyHint);
-      return;
-    }
-
-    for (const [key, child] of Object.entries(node as Record<string, unknown>)) {
-      visit(child, key);
-    }
-  };
-
-  visit(value);
-  return texts.filter(text => text.trim().length > 0);
 }
 
 export class AcpAgent extends BaseAgent {
@@ -214,9 +160,15 @@ export class AcpAgent extends BaseAgent {
   private requestId = 0;
   private _isProcessing = false;
   private acpSessionId: string | null = null;
-  private agentCapabilities: Record<string, unknown> | null = null;
+  private agentCapabilities: AgentCapabilities | null = null;
   private abortReason?: AbortReason;
   private currentTurnText = '';
+  /**
+   * True only for the very first prompt of a freshly created or loaded session.
+   * Used to gate the inclusion of `_meta.systemContext` on `session/prompt`
+   * (subsequent turns reuse the agent's in-memory history).
+   */
+  private firstTurnInSession = true;
   private pendingPermissions = new Map<string, {
     resolve: (allowed: boolean) => void;
     requestId: string | number;
@@ -244,17 +196,19 @@ export class AcpAgent extends BaseAgent {
       await this.ensureSubprocess();
       await this.ensureSession();
 
-      const craftContext = this.buildCraftContext();
-      const attachmentText = (attachments || [])
-        .map(att => `[Attached file: ${att.name || att.path || att.storedPath}]\n[Stored at: ${att.storedPath || att.path || ''}]`)
-        .join('\n\n');
-      const promptText = [craftContext, attachmentText, message].filter(Boolean).join('\n\n');
+      const promptContent = this.buildSessionPromptContent(message, attachments);
+      const promptParams: Record<string, unknown> = {
+        sessionId: this.acpSessionId,
+        prompt: promptContent,
+      };
+      const meta = this.buildPromptMeta();
+      if (meta) promptParams._meta = meta;
 
       const promptId = this.nextId('prompt');
-      const done = this.sendRequestWithId(promptId, 'session/prompt', {
-        sessionId: this.acpSessionId,
-        prompt: textBlock(promptText),
-      }).then((result) => {
+      const done = this.sendRequestWithId(promptId, 'session/prompt', promptParams).then((result) => {
+        // Mark first-turn-after-(new|load) as consumed; subsequent prompts
+        // skip systemContext to avoid resending it every turn.
+        this.firstTurnInSession = false;
         const resultText = extractAcpText(result).join('');
         const finalText = this.combineStreamAndResult(this.currentTurnText, resultText);
         if (finalText) {
@@ -304,10 +258,16 @@ export class AcpAgent extends BaseAgent {
     await this.ensureSession();
     this.currentTurnText = '';
 
-    const result = await this.sendRequest('session/prompt', {
+    const promptContent = this.buildSessionPromptContent(prompt, undefined);
+    const params: Record<string, unknown> = {
       sessionId: this.acpSessionId,
-      prompt: textBlock(prompt),
-    });
+      prompt: promptContent,
+    };
+    const meta = this.buildPromptMeta();
+    if (meta) params._meta = meta;
+
+    const result = await this.sendRequest('session/prompt', params);
+    this.firstTurnInSession = false;
 
     const resultText = extractAcpText(result).join('');
     return this.combineStreamAndResult(this.currentTurnText, resultText).trim() || null;
@@ -372,7 +332,8 @@ export class AcpAgent extends BaseAgent {
         version: '0.0.0',
       },
     }).then((result) => {
-      this.agentCapabilities = asRecord(asRecord(result)?.agentCapabilities ?? asRecord(result)?.capabilities);
+      const caps = asRecord(asRecord(result)?.agentCapabilities ?? asRecord(result)?.capabilities);
+      this.agentCapabilities = caps as AgentCapabilities | null;
     });
 
     await this.initialized;
@@ -430,16 +391,47 @@ export class AcpAgent extends BaseAgent {
     const result = await this.sendRequest('session/new', {
       cwd: this.resolvedCwd(),
       mcpServers: normalizeAcpMcpServers(this.config.initialSources?.mcpServers),
-      _meta: {
-        craftSessionId: this.config.session?.id || this._sessionId,
-        workspaceRoot: this.config.workspace.rootPath,
-        model: this._model || undefined,
-        systemContext: this.buildCraftContext(),
-        craftAgentCapabilities: this.agentCapabilities ? Object.keys(this.agentCapabilities) : [],
-      },
+      _meta: this.buildSessionInitMeta(),
     });
 
     this.acpSessionId = this.extractSessionId(result) || this.config.session?.id || this._sessionId;
+    // A freshly created session needs systemContext on its first prompt;
+    // subsequent prompts reuse the agent's in-memory history.
+    this.firstTurnInSession = true;
+  }
+
+  /**
+   * Build the per-prompt content array, branching on the agent's
+   * advertised PromptCapabilities for image/audio attachments. The
+   * Craft system context is *not* included here — it goes on the
+   * first prompt's `_meta.systemContext` (see `buildPromptMeta`).
+   */
+  private buildSessionPromptContent(message: string, attachments: readonly FileAttachment[] | undefined) {
+    const caps: PromptCapabilities | undefined = this.agentCapabilities?.promptCapabilities;
+    return buildPromptContent(message, attachments, caps);
+  }
+
+  /**
+   * Build `_meta` for `session/prompt`. Returns a Craft-context payload only
+   * on the first turn after `session/new` (or `session/load` in later phases).
+   * Returns `null` for subsequent turns so we don't resend the system prompt.
+   */
+  private buildPromptMeta(): Record<string, unknown> | null {
+    if (!this.firstTurnInSession) return null;
+    const systemContext = this.buildCraftContext();
+    if (!systemContext) return null;
+    return { systemContext };
+  }
+
+  /** Metadata sent on `session/new` and (later) `session/load`. */
+  private buildSessionInitMeta(): Record<string, unknown> {
+    return {
+      craftSessionId: this.config.session?.id || this._sessionId,
+      workspaceRoot: this.config.workspace.rootPath,
+      model: this._model || undefined,
+      systemContext: this.buildCraftContext(),
+      craftAgentCapabilities: this.agentCapabilities ? Object.keys(this.agentCapabilities) : [],
+    };
   }
 
   private handleLine(line: string): void {
@@ -512,46 +504,96 @@ export class AcpAgent extends BaseAgent {
     const update = firstRecord(asRecord(params), ['update']) ?? asRecord(params);
     const updateKind = normalizeSessionUpdateKind(firstString(update, ['sessionUpdate', 'session_update']));
 
-    if (updateKind === 'tool_call' || updateKind === 'tool_call_update') {
-      const tool = extractToolPayload(update);
-      if (!tool) return;
-      if (updateKind === 'tool_call') {
+    switch (updateKind) {
+      case 'tool_call':
+      case 'tool_call_update': {
+        const tool = extractToolPayload(update);
+        if (!tool) return;
+        if (updateKind === 'tool_call') {
+          this.eventQueue.enqueue({
+            type: 'tool_start',
+            toolName: tool.name,
+            toolUseId: tool.id,
+            input: tool.input,
+            parentToolUseId: tool.parentToolUseId,
+          });
+          if (tool.result == null) return;
+        }
         this.eventQueue.enqueue({
-          type: 'tool_start',
+          type: 'tool_result',
           toolName: tool.name,
           toolUseId: tool.id,
-          input: tool.input,
+          result: tool.result ?? '',
+          isError: !!tool.isError,
           parentToolUseId: tool.parentToolUseId,
         });
-        if (tool.result == null) return;
+        return;
       }
-      this.eventQueue.enqueue({
-        type: 'tool_result',
-        toolName: tool.name,
-        toolUseId: tool.id,
-        result: tool.result ?? '',
-        isError: !!tool.isError,
-        parentToolUseId: tool.parentToolUseId,
-      });
-      return;
-    }
 
-    if (updateKind && STATUS_SESSION_UPDATE_KINDS.has(updateKind)) {
-      const message = extractAcpStatusText(update);
-      if (message) {
-        this.eventQueue.enqueue({ type: 'status', message });
+      case 'agent_message_chunk':
+      case 'user_message_chunk': {
+        const walked = walkContentBlocks(update, 'agent_message_chunk');
+        for (const text of walked.texts) {
+          this.currentTurnText += text;
+          this.eventQueue.enqueue({ type: 'text_delta', text });
+        }
+        return;
       }
-      return;
-    }
 
-    if (updateKind && !TEXT_SESSION_UPDATE_KINDS.has(updateKind)) {
-      this.debug(`Ignoring unsupported ACP session update kind: ${updateKind}`);
-      return;
-    }
+      case 'agent_thought_chunk': {
+        const walked = walkContentBlocks(update, 'agent_thought_chunk');
+        for (const text of walked.thoughts) {
+          this.eventQueue.enqueue({ type: 'thinking', text });
+        }
+        return;
+      }
 
-    for (const text of extractAcpText(update ?? params)) {
-      this.currentTurnText += text;
-      this.eventQueue.enqueue({ type: 'text_delta', text });
+      case 'plan':
+      case 'available_commands_update':
+      case 'current_mode_update':
+      case 'config_option_update':
+      case 'session_info_update': {
+        // Surface these as informational events so the UI can render them
+        // when supported, without blocking the stream on unknown shapes.
+        const message = extractAcpStatusText(update);
+        if (message) this.eventQueue.enqueue({ type: 'info', message });
+        return;
+      }
+
+      // Non-spec but commonly seen Craft extension — some agents emit progress
+      // markers under `status`/`progress`/`thought` discriminators. Treat them
+      // as status events rather than slurping their text into the assistant
+      // message stream.
+      case 'status':
+      case 'progress':
+      case 'agent_status':
+      case 'session_status': {
+        const message = extractAcpStatusText(update);
+        if (message) this.eventQueue.enqueue({ type: 'status', message });
+        return;
+      }
+      case 'thinking':
+      case 'thinking_chunk':
+      case 'thought':
+      case 'thought_chunk':
+      case 'agent_thought': {
+        const text = extractAcpStatusText(update);
+        if (text) this.eventQueue.enqueue({ type: 'thinking', text });
+        return;
+      }
+
+      default: {
+        if (updateKind) {
+          this.debug(`Ignoring unsupported ACP session update kind: ${updateKind}`);
+          return;
+        }
+        // Unkinded update with bare text — fall back to legacy text extraction
+        // for older agents that pre-date the SessionUpdate discriminator.
+        for (const text of extractAcpText(update ?? params)) {
+          this.currentTurnText += text;
+          this.eventQueue.enqueue({ type: 'text_delta', text });
+        }
+      }
     }
   }
 
