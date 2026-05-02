@@ -89,6 +89,60 @@ rl.on('line', (line) => {
   return scriptPath;
 }
 
+async function createFixtureAcpSpecPermissionServer(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'craft-acp-spec-permission-fixture-'));
+  const scriptPath = join(dir, 'fixture-acp-spec-permission.mjs');
+  await writeFile(scriptPath, `
+import readline from 'node:readline';
+
+const rl = readline.createInterface({ input: process.stdin });
+let promptId = null;
+let approvalLog = null;
+function send(value) {
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\\n');
+}
+
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') {
+    send({ id: msg.id, result: { protocolVersion: 1, agentInfo: { name: 'fixture' } } });
+    return;
+  }
+  if (msg.method === 'session/new') {
+    send({ id: msg.id, result: { sessionId: 'spec-session' } });
+    return;
+  }
+  if (msg.method === 'session/prompt') {
+    promptId = msg.id;
+    send({
+      id: 'approval-spec',
+      method: 'session/request_permission',
+      params: {
+        sessionId: 'spec-session',
+        toolCall: { toolCallId: 't1', title: 'Bash', rawInput: { command: 'echo ok' }, kind: 'execute' },
+        options: [
+          { optionId: 'a', name: 'Allow once', kind: 'allow_once' },
+          { optionId: 'b', name: 'Allow always', kind: 'allow_always' },
+          { optionId: 'c', name: 'Reject', kind: 'reject_once' },
+        ],
+      },
+    });
+    return;
+  }
+  if (msg.id === 'approval-spec') {
+    approvalLog = msg.result;
+    const picked = msg.result?.outcome?.optionId ?? msg.result?.outcome?.outcome ?? 'unknown';
+    send({
+      method: 'session/update',
+      params: { sessionId: 'spec-session', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'picked:' + picked } } },
+    });
+    send({ id: promptId, result: { stopReason: 'end_turn' } });
+  }
+});
+`, 'utf8');
+  return scriptPath;
+}
+
 function createConfig(scriptPath: string): BackendConfig {
   const rootPath = tmpdir();
   return {
@@ -221,5 +275,94 @@ rl.on('line', (line) => {
     });
     expect(events).toContainEqual({ type: 'text_complete', text: 'approved' });
     expect(events.at(-1)).toEqual({ type: 'complete' });
+  });
+
+  it('responds to spec-shaped session/request_permission with the matching optionId', async () => {
+    const scriptPath = await createFixtureAcpSpecPermissionServer();
+    const agent = new AcpAgent(createConfig(scriptPath));
+    const events: any[] = [];
+    let captured: Parameters<NonNullable<typeof agent.onPermissionRequest>>[0] | null = null;
+
+    agent.onPermissionRequest = (request) => {
+      captured = request;
+      agent.respondToPermission(request.requestId, true, false);
+    };
+
+    try {
+      for await (const event of agent.chat('Run a tool')) events.push(event);
+    } finally {
+      agent.destroy();
+    }
+
+    // Forwarded with the agent-supplied options array intact.
+    expect(captured).not.toBeNull();
+    type CapturedRequest = Parameters<NonNullable<typeof agent.onPermissionRequest>>[0];
+    const cap: CapturedRequest = captured!;
+    expect(cap.options).toEqual([
+      { optionId: 'a', name: 'Allow once', kind: 'allow_once' },
+      { optionId: 'b', name: 'Allow always', kind: 'allow_always' },
+      { optionId: 'c', name: 'Reject', kind: 'reject_once' },
+    ]);
+    expect(cap.toolName).toBe('Bash');
+    expect(cap.command).toBe('echo ok');
+
+    // Server echoed the chosen optionId into the assistant message.
+    expect(events).toContainEqual({ type: 'text_delta', text: 'picked:a' });
+  });
+
+  it('uses allow_always when responder passes alwaysAllow=true', async () => {
+    const scriptPath = await createFixtureAcpSpecPermissionServer();
+    const agent = new AcpAgent(createConfig(scriptPath));
+    const events: any[] = [];
+
+    agent.onPermissionRequest = (request) => {
+      agent.respondToPermission(request.requestId, true, true);
+    };
+
+    try {
+      for await (const event of agent.chat('Run a tool')) events.push(event);
+    } finally {
+      agent.destroy();
+    }
+
+    expect(events).toContainEqual({ type: 'text_delta', text: 'picked:b' });
+  });
+
+  it('uses reject_once when responder denies', async () => {
+    const scriptPath = await createFixtureAcpSpecPermissionServer();
+    const agent = new AcpAgent(createConfig(scriptPath));
+    const events: any[] = [];
+
+    agent.onPermissionRequest = (request) => {
+      agent.respondToPermission(request.requestId, false, false);
+    };
+
+    try {
+      for await (const event of agent.chat('Run a tool')) events.push(event);
+    } finally {
+      agent.destroy();
+    }
+
+    expect(events).toContainEqual({ type: 'text_delta', text: 'picked:c' });
+  });
+
+  it('honors an explicit optionId passed by the responder', async () => {
+    const scriptPath = await createFixtureAcpSpecPermissionServer();
+    const agent = new AcpAgent(createConfig(scriptPath));
+    const events: any[] = [];
+
+    agent.onPermissionRequest = (request) => {
+      // Even though allowed=true would normally pick allow_once, the explicit
+      // optionId override wins.
+      agent.respondToPermission(request.requestId, true, false, 'b');
+    };
+
+    try {
+      for await (const event of agent.chat('Run a tool')) events.push(event);
+    } finally {
+      agent.destroy();
+    }
+
+    expect(events).toContainEqual({ type: 'text_delta', text: 'picked:b' });
   });
 });

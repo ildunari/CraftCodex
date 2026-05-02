@@ -21,8 +21,13 @@ import { EventQueue } from './backend/event-queue.ts';
 import { getBackendRuntime } from './backend/internal/driver-types.ts';
 import { getSystemPrompt } from '../prompts/system.ts';
 import { getSessionPlansPath } from '../sessions/storage.ts';
-import type { AgentCapabilities, PromptCapabilities } from './acp/acp-types.ts';
+import type { AgentCapabilities, PermissionOption, PromptCapabilities } from './acp/acp-types.ts';
 import { buildPromptContent, extractAcpText as helperExtractAcpText, walkContentBlocks } from './acp/acp-content.ts';
+import {
+  buildPermissionResponse,
+  parsePermissionRequestParams,
+  pickOptionId,
+} from './acp/acp-permissions.ts';
 
 /** Re-export so the existing test import (`{ extractAcpText } from '../acp-agent'`) keeps working. */
 export const extractAcpText = helperExtractAcpText;
@@ -170,8 +175,9 @@ export class AcpAgent extends BaseAgent {
    */
   private firstTurnInSession = true;
   private pendingPermissions = new Map<string, {
-    resolve: (allowed: boolean) => void;
+    resolve: (decision: { allowed: boolean; alwaysAllow: boolean; optionId?: string }) => void;
     requestId: string | number;
+    options: PermissionOption[];
   }>();
 
   constructor(config: BackendConfig) {
@@ -287,11 +293,11 @@ export class AcpAgent extends BaseAgent {
     return this._isProcessing;
   }
 
-  respondToPermission(requestId: string, allowed: boolean, _alwaysAllow?: boolean, _optionId?: string): void {
+  respondToPermission(requestId: string, allowed: boolean, alwaysAllow?: boolean, optionId?: string): void {
     const pending = this.pendingPermissions.get(requestId);
     if (!pending) return;
     this.pendingPermissions.delete(requestId);
-    pending.resolve(allowed);
+    pending.resolve({ allowed, alwaysAllow: !!alwaysAllow, optionId });
   }
 
   async abort(reason?: string): Promise<void> {
@@ -302,7 +308,7 @@ export class AcpAgent extends BaseAgent {
     this.abortReason = reason;
     this._isProcessing = false;
     for (const [, pending] of this.pendingPermissions) {
-      pending.resolve(false);
+      pending.resolve({ allowed: false, alwaysAllow: false });
     }
     this.pendingPermissions.clear();
     void this.sendRequest('session/cancel', { sessionId: this.acpSessionId }).catch(() => {});
@@ -608,35 +614,80 @@ export class AcpAgent extends BaseAgent {
       return;
     }
 
+    // Parse the spec shape first; tolerate the legacy command/toolName/...
+    // payload by falling back to the bare-record reader when no spec
+    // toolCall/options are present.
+    const spec = parsePermissionRequestParams(message.params);
     const params = asRecord(message.params);
-    const permissionId = `acp-perm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const command = firstString(params, ['command', 'cmd']);
-    const toolName = firstString(params, ['toolName', 'tool_name', 'tool']) ?? 'ACP Tool';
-    const description = firstString(params, ['description', 'message', 'reason'])
+    const toolCallRecord = spec ? asRecord(spec.toolCall) : null;
+
+    // Tool-call metadata: spec puts these on `toolCall.{title,rawInput,kind}`.
+    const toolName = firstString(toolCallRecord, ['title', 'name', 'toolName'])
+      ?? firstString(params, ['toolName', 'tool_name', 'tool'])
+      ?? 'ACP Tool';
+    const rawInput = asRecord(toolCallRecord?.rawInput) ?? asRecord(toolCallRecord?.input);
+    const command = firstString(rawInput, ['command', 'cmd'])
+      ?? firstString(params, ['command', 'cmd']);
+    const description = firstString(toolCallRecord, ['description', 'title'])
+      ?? firstString(params, ['description', 'message', 'reason'])
       ?? command
       ?? `${toolName} requests permission to continue`;
     const permissionType = command ? 'bash' : 'mcp_mutation';
+    const reason = firstString(params, ['reason']);
+    const options: PermissionOption[] = spec?.options ?? [];
 
-    const allowed = await new Promise<boolean>((resolve) => {
-      this.pendingPermissions.set(permissionId, { resolve, requestId: message.id! });
+    const permissionId = `acp-perm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    const decision = await new Promise<{ allowed: boolean; alwaysAllow: boolean; optionId?: string }>((resolve) => {
+      this.pendingPermissions.set(permissionId, { resolve, requestId: message.id!, options });
       this.onPermissionRequest?.({
         requestId: permissionId,
         toolName,
         command,
         description,
         type: permissionType,
-        reason: firstString(params, ['reason']),
+        reason,
+        options: options.length ? options : undefined,
       });
-      if (!this.onPermissionRequest) resolve(true);
+      // No callback configured (headless or test fixture) — auto-allow once.
+      if (!this.onPermissionRequest) resolve({ allowed: true, alwaysAllow: false });
     });
 
     this.pendingPermissions.delete(permissionId);
+
+    // Aborted mid-flight: respond with the spec `cancelled` outcome.
+    if (this.abortReason) {
+      this.writeMessage({
+        jsonrpc: '2.0',
+        id: message.id,
+        result: { outcome: { outcome: 'cancelled' } },
+      });
+      return;
+    }
+
+    const optionId = options.length
+      ? pickOptionId(options, decision.allowed, decision.alwaysAllow, decision.optionId)
+      : null;
+
+    if (options.length) {
+      this.writeMessage({
+        jsonrpc: '2.0',
+        id: message.id,
+        result: buildPermissionResponse(optionId),
+      });
+      return;
+    }
+
+    // Legacy / non-spec server: keep emitting the historical payload so we
+    // don't regress agents that didn't send an `options` list. They get
+    // both a spec-shaped envelope and the legacy `allowed`/`decision` fields.
     this.writeMessage({
       jsonrpc: '2.0',
       id: message.id,
       result: {
-        allowed,
-        decision: allowed ? 'accept' : 'decline',
+        outcome: { outcome: decision.allowed ? 'selected' : 'cancelled', optionId: decision.allowed ? 'allow' : undefined },
+        allowed: decision.allowed,
+        decision: decision.allowed ? 'accept' : 'decline',
       },
     });
   }
