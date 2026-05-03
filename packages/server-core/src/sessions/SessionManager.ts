@@ -2892,7 +2892,9 @@ export class SessionManager implements ISessionManager {
         // use the correct model for summarization (instead of hardcoded Haiku)
         ...(miniModel ? { ANTHROPIC_DEFAULT_HAIKU_MODEL: miniModel } : {}),
       }
-      await applyAgentCredentialEnvOverrides(backendContext.connection, envOverrides)
+      if (backendContext) {
+        await applyAgentCredentialEnvOverrides(backendContext.connection, envOverrides)
+      }
       managed.envOverrides = envOverrides
 
       // ============================================================
@@ -7300,7 +7302,9 @@ export class SessionManager implements ISessionManager {
       CRAFT_WORKSPACE_PATH: workspaceRootPath,
       ...(miniModel ? { ANTHROPIC_DEFAULT_HAIKU_MODEL: miniModel } : {}),
     }
-    await applyAgentCredentialEnvOverrides(backendContext.connection, envOverrides)
+    if (backendTarget.kind === 'built-in') {
+      await applyAgentCredentialEnvOverrides(backendTarget.backendContext.connection, envOverrides)
+    }
 
     const agent = this.createHeadlessHelperAgent(managed, `${managed.id}-remote-transfer-summary`, {
       model: managed.model || miniModel,

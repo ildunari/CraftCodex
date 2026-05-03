@@ -280,13 +280,13 @@ function findNearestHeading(doc: Document, selectedText: string): string | null 
   if (selIdx < 0) return null
 
   let bestHeading: string | null = null
-  for (const h of headings) {
+  headings.forEach((h) => {
     const hText = h.textContent ?? ''
     const hIdx = bodyText.indexOf(hText)
     if (hIdx >= 0 && hIdx < selIdx) {
       bestHeading = hText.trim()
     }
-  }
+  })
 
   return bestHeading
 }

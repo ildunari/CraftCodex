@@ -14,6 +14,7 @@
     "./chat/turn-utils": "./src/components/chat/turn-utils.ts",
     "./markdown": "./src/components/markdown/index.ts",
     "./annotations/follow-up-state": "./src/components/annotations/follow-up-state.ts",
+    "./annotations/follow-up-formatter-registry": "./src/components/annotations/follow-up-formatter-registry.ts",
     "./context": "./src/context/index.ts",
     "./styles": "./src/styles/index.css"
   },

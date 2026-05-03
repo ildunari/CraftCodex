@@ -103,6 +103,16 @@ const BUILTIN_BACKEND_PLUGIN_METADATA: Record<AgentProvider, {
     pluginName: 'Pi Backend',
     description: 'Built-in Pi backend support.',
   },
+  acp: {
+    pluginId: 'craft.backend.acp',
+    pluginName: 'ACP Backend',
+    description: 'Built-in Agent Client Protocol backend support.',
+  },
+  codex: {
+    pluginId: 'craft.backend.codex',
+    pluginName: 'Codex Backend',
+    description: 'Built-in Codex CLI backend support.',
+  },
 };
 
 export function getBuiltInBackendId(provider: AgentProvider): string {
