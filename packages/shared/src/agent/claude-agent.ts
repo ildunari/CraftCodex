@@ -688,7 +688,7 @@ export class ClaudeAgent extends BaseAgent {
    * Respond to a pending permission request.
    * Uses permissionManager for whitelisting.
    */
-  respondToPermission(requestId: string, allowed: boolean, alwaysAllow: boolean = false): void {
+  respondToPermission(requestId: string, allowed: boolean, alwaysAllow: boolean = false, _optionId?: string): void {
     this.debug(`respondToPermission: ${requestId}, allowed=${allowed}, alwaysAllow=${alwaysAllow}, pending=${this.pendingPermissions.has(requestId)}`);
     const pending = this.pendingPermissions.get(requestId);
     if (pending) {
