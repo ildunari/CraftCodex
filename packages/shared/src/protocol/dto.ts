@@ -23,6 +23,11 @@ import type {
   CredentialInputMode as SharedCredentialInputMode,
   CredentialAuthRequest as SharedCredentialAuthRequest,
 } from '../agent/index'
+import type {
+  PluginCapabilityRef,
+  PluginDetails,
+  PluginSummary,
+} from '../plugins'
 
 export type { AgentBackendCapabilities } from '../agent/backend'
 export type { NativeCapabilitySyncManifest } from '../agent/backend'
@@ -76,6 +81,7 @@ export interface Session {
   sharedUrl?: string
   sharedId?: string
   model?: string
+  backendId?: string
   llmConnection?: string
   thinkingLevel?: ThinkingLevel
   lastMessageRole?: 'user' | 'assistant' | 'plan' | 'tool' | 'error'
@@ -127,6 +133,7 @@ export interface CreateSessionOptions {
    */
   workingDirectory?: string | 'user_default' | 'none'
   model?: string
+  backendId?: string
   llmConnection?: string
   systemPromptPreset?: 'default' | 'mini' | string
   hidden?: boolean
@@ -259,6 +266,26 @@ export type SessionCommand =
 export interface NewChatActionParams {
   input?: string
   name?: string
+}
+
+// ---------------------------------------------------------------------------
+// Plugin host DTOs
+// ---------------------------------------------------------------------------
+
+export interface PluginToggleResult {
+  plugin: PluginDetails
+}
+
+export interface PluginListResponse {
+  plugins: PluginSummary[]
+}
+
+export interface PluginDetailsResponse {
+  plugin: PluginDetails
+}
+
+export interface PluginCapabilitiesResponse {
+  capabilities: PluginCapabilityRef[]
 }
 
 // ---------------------------------------------------------------------------

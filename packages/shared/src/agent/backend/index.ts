@@ -75,6 +75,7 @@ export type {
   LlmProviderType,
   PostInitResult,
 } from './types.ts';
+export type { ExternalPluginBackendRegistration } from './factory.ts';
 
 // Enums need to be exported as values, not just types
 export { AbortReason } from './types.ts';
@@ -97,11 +98,21 @@ export {
   createBackendFromResolvedContext,
   initializeBackendHostRuntime,
   resolveBackendHostTooling,
+  createBuiltInBackendPluginManifests,
+  createExternalPluginBackend,
   fetchBackendModels,
+  getExternalBackendCapabilities,
+  getExternalPluginBackend,
+  getBuiltInBackendId,
   validateStoredBackendConnection,
+  inferBackendIdFromConnectionSlug,
+  listExternalPluginBackends,
   providerTypeToAgentProvider,
+  registerExternalPluginBackend,
+  unregisterExternalPluginBackend,
   // Capabilities and utilities
   BACKEND_CAPABILITIES,
+  clearExternalPluginBackendsForTests,
   resolveModelForProvider,
   getDefaultAuthType,
   cleanupSourceRuntimeArtifacts,

@@ -75,4 +75,13 @@ describe('channel routing behavior', () => {
     expect(LOCAL_ONLY_CHANNELS.has(RPC_CHANNELS.llmConnections.OPEN_AGENT_SETUP)).toBe(true)
     expect(LOCAL_ONLY_CHANNELS.has(RPC_CHANNELS.llmConnections.SAVE_AGENT_API_KEY)).toBe(true)
   })
+
+  test('all plugins:* channels are REMOTE_ELIGIBLE', () => {
+    const pluginChannels = Object.values(RPC_CHANNELS.plugins)
+    expect(pluginChannels.length).toBeGreaterThan(0)
+
+    for (const ch of pluginChannels) {
+      expect(REMOTE_ELIGIBLE_CHANNELS.has(ch)).toBe(true)
+    }
+  })
 })

@@ -13,7 +13,6 @@
  */
 
 import { RPC_CHANNELS } from './types'
-import { FEATURE_FLAGS } from '@craft-agent/shared/feature-flags'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -217,7 +216,7 @@ export const MENU_SECTIONS: MenuSection[] = [EDIT_MENU, VIEW_MENU, WINDOW_MENU]
  * Settings item definition
  * Used by both AppMenu (logo dropdown) and SettingsNavigator (sidebar panel)
  */
-import { SETTINGS_PAGES, type SettingsSubpage } from './settings-registry'
+import { VISIBLE_SETTINGS_PAGES, type SettingsSubpage } from './settings-registry'
 
 export interface SettingsMenuItem {
   id: SettingsSubpage
@@ -233,6 +232,8 @@ export interface SettingsMenuItem {
 const SETTINGS_ICONS: Record<SettingsSubpage, string> = {
   app: 'ToggleRight',
   ai: 'Sparkles',
+  plugins: 'Puzzle',
+  routing: 'Route',
   appearance: 'Palette',
   input: 'Keyboard',
   workspace: 'Building2',
@@ -248,8 +249,7 @@ const SETTINGS_ICONS: Record<SettingsSubpage, string> = {
  * All settings pages - derived from settings-registry (single source of truth)
  * Order is determined by SETTINGS_PAGES in settings-registry.ts
  */
-export const SETTINGS_ITEMS: SettingsMenuItem[] = SETTINGS_PAGES
-  .filter(page => page.id !== 'server' || FEATURE_FLAGS.embeddedServer)
+export const SETTINGS_ITEMS: SettingsMenuItem[] = VISIBLE_SETTINGS_PAGES
   .map(page => ({
     id: page.id,
     labelKey: page.labelKey,

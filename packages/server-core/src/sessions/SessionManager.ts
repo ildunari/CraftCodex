@@ -9,10 +9,14 @@ import { randomUUID } from 'node:crypto'
 import { type AgentEvent, setPermissionMode, hydratePreviousPermissionMode, getPermissionModeDiagnostics, type PermissionMode, unregisterSessionScopedToolCallbacks, mergeSessionScopedToolCallbacks, AbortReason, type AuthRequest, type AuthResult, type CredentialAuthRequest, type BrowserPaneFns, generateConversationSummary } from '@craft-agent/shared/agent'
 import {
   resolveSessionConnection,
-  createBackendFromConnection,
+  createExternalPluginBackend,
   resolveBackendContext,
   createBackendFromResolvedContext,
   cleanupSourceRuntimeArtifacts,
+  getExternalBackendCapabilities,
+  getExternalPluginBackend,
+  getBuiltInBackendId,
+  inferBackendIdFromConnectionSlug,
   providerTypeToAgentProvider,
   resolveModelForProvider,
   type AgentBackend,
@@ -834,6 +838,8 @@ interface ManagedSession {
   sharedId?: string
   // Model to use for this session (overrides global config if set)
   model?: string
+  // Backend identifier resolved for this session (plugin contribution id)
+  backendId?: string
   // LLM connection slug for this session (locked after first message)
   llmConnection?: string
   // Whether the connection is locked (cannot be changed after first agent creation)
@@ -955,6 +961,10 @@ export function createManagedSession(
     }
   }
 
+  if (!sourceFields.backendId && typeof sourceFields.llmConnection === 'string') {
+    sourceFields.backendId = inferBackendIdFromConnectionSlug(sourceFields.llmConnection)
+  }
+
   const managed = {
     // Spread all session-like fields from source (id, name, permissionMode, labels, model, etc.)
     // This ensures new persistent fields automatically flow through without manual copying.
@@ -993,6 +1003,82 @@ export function createManagedSession(
   return managed
 }
 
+export function syncBackendIdFromConnection(
+  target: { llmConnection?: string; backendId?: string },
+): void {
+  target.backendId = target.llmConnection
+    ? inferBackendIdFromConnectionSlug(target.llmConnection)
+    : undefined
+}
+
+type SessionBackendTarget =
+  | {
+    kind: 'built-in'
+    backendId: string
+    backendContext: ReturnType<typeof resolveBackendContext>
+    capabilities: { needsHttpPoolServer: boolean }
+    supportsBranching: true
+  }
+  | {
+    kind: 'external'
+    backendId: string
+    definition: NonNullable<ReturnType<typeof getExternalPluginBackend>>
+    resolvedModel?: string
+    capabilities: { needsHttpPoolServer: boolean; supportsBranching: boolean }
+    supportsBranching: boolean
+  }
+
+export function resolveSessionBackendTarget(args: {
+  backendId?: string
+  llmConnection?: string
+  workspaceDefaultConnectionSlug?: string
+  model?: string
+}): SessionBackendTarget {
+  const requestedBackendId = args.backendId?.trim() || undefined
+  const externalDefinition = requestedBackendId
+    ? getExternalPluginBackend(requestedBackendId)
+    : undefined
+
+  if (externalDefinition) {
+    if (args.llmConnection) {
+      throw new Error('External plugin backends do not support llmConnection selection')
+    }
+
+    return {
+      kind: 'external',
+      backendId: externalDefinition.backendId,
+      definition: externalDefinition,
+      resolvedModel: args.model || externalDefinition.defaultModel,
+      capabilities: getExternalBackendCapabilities(externalDefinition.backendId) ?? {
+        needsHttpPoolServer: false,
+        supportsBranching: false,
+      },
+      supportsBranching: externalDefinition.supportsBranching ?? false,
+    }
+  }
+
+  const backendContext = resolveBackendContext({
+    sessionConnectionSlug: args.llmConnection,
+    workspaceDefaultConnectionSlug: args.workspaceDefaultConnectionSlug,
+    managedModel: args.model,
+  })
+  const resolvedBackendId = getBuiltInBackendId(backendContext.provider)
+
+  if (requestedBackendId && requestedBackendId !== resolvedBackendId) {
+    throw new Error(
+      `Requested backend "${requestedBackendId}" does not match the resolved connection backend "${resolvedBackendId}"`,
+    )
+  }
+
+  return {
+    kind: 'built-in',
+    backendId: resolvedBackendId,
+    backendContext,
+    capabilities: backendContext.capabilities,
+    supportsBranching: true,
+  }
+}
+
 /**
  * Resolve supportsBranching for a managed session.
  * Prefers the live agent instance, then falls back to provider capabilities.
@@ -1001,6 +1087,13 @@ function resolveSupportsBranching(managed: ManagedSession): boolean {
   // If agent is live, use its instance property (authoritative)
   if (managed.agent) {
     return managed.agent.supportsBranching
+  }
+
+  if (managed.backendId) {
+    const externalBackend = getExternalPluginBackend(managed.backendId)
+    if (externalBackend) {
+      return externalBackend.supportsBranching ?? false
+    }
   }
 
   const wsConfig = loadWorkspaceConfig(managed.workspace.rootPath)
@@ -1731,6 +1824,7 @@ export class SessionManager implements ISessionManager {
               sessionLog.warn(`Session ${meta.id} has orphaned llmConnection "${managed.llmConnection}", clearing`)
               managed.llmConnection = undefined
               managed.connectionLocked = false
+              syncBackendIdFromConnection(managed)
             }
           }
 
@@ -2307,14 +2401,22 @@ export class SessionManager implements ISessionManager {
     }
 
     // Resolve backend target early for branching policy checks.
-    const targetBackendContext = resolveBackendContext({
-      sessionConnectionSlug: options?.llmConnection,
+    const targetBackend = resolveSessionBackendTarget({
+      backendId: options?.backendId,
+      llmConnection: options?.llmConnection,
       workspaceDefaultConnectionSlug: wsConfig?.defaults?.defaultLlmConnection,
-      managedModel: resolvedModelOption,
+      model: resolvedModelOption,
     })
-    const targetProviderType = targetBackendContext.connection?.providerType
-      ?? (targetBackendContext.provider === 'pi' ? 'pi' : 'anthropic')
-    const targetPiAuthProvider = targetBackendContext.connection?.piAuthProvider
+    const targetBackendContext = targetBackend.kind === 'built-in'
+      ? targetBackend.backendContext
+      : undefined
+    const targetProviderType = targetBackend.kind === 'built-in'
+      ? (targetBackend.backendContext.connection?.providerType
+        ?? (targetBackend.backendContext.provider === 'pi' ? 'pi' : 'anthropic'))
+      : undefined
+    const targetPiAuthProvider = targetBackend.kind === 'built-in'
+      ? targetBackend.backendContext.connection?.piAuthProvider
+      : undefined
 
     // Resolve working directory from options:
     // - 'user_default' or undefined: Use workspace's configured default
@@ -2379,21 +2481,28 @@ export class SessionManager implements ISessionManager {
         throw new Error(`Invalid branch request: source session ${options.branchFromSessionId} not found`)
       }
 
-      const sourceBackendContext = resolveBackendContext({
-        sessionConnectionSlug: sourceManaged?.llmConnection || sourceSession.llmConnection,
+      const sourceBackend = resolveSessionBackendTarget({
+        backendId: sourceManaged?.backendId || sourceSession.backendId,
+        llmConnection: sourceManaged?.llmConnection || sourceSession.llmConnection,
         workspaceDefaultConnectionSlug: wsConfig?.defaults?.defaultLlmConnection,
-        managedModel: sourceManaged?.model || sourceSession.model,
+        model: sourceManaged?.model || sourceSession.model,
       })
+
+      if (sourceBackend.kind === 'external' || targetBackend.kind === 'external') {
+        throw new Error('Branching is not supported for external plugin backends yet.')
+      }
+
+      const sourceBackendContext = sourceBackend.backendContext
       const sourceProviderType = sourceBackendContext.connection?.providerType
         ?? (sourceBackendContext.provider === 'pi' ? 'pi' : 'anthropic')
       const sourcePiAuthProvider = sourceBackendContext.connection?.piAuthProvider
 
-      if (!sourceBackendContext.capabilities.supportsBranching || !targetBackendContext.capabilities.supportsBranching) {
+      if (!sourceBackendContext.capabilities.supportsBranching || !targetBackendContext?.capabilities.supportsBranching) {
         sessionLog.warn('Branch validation failed: backend does not support branching', {
           workspaceId,
           branchFromSessionId: options.branchFromSessionId,
           sourceProvider: sourceBackendContext.provider,
-          targetProvider: targetBackendContext.provider,
+          targetProvider: targetBackendContext?.provider,
         })
         throw new Error('Branching is not supported by this agent backend yet.')
       }
@@ -2410,7 +2519,7 @@ export class SessionManager implements ISessionManager {
           sourceProvider: sourceBackendContext.provider,
           sourceProviderType,
           sourcePiAuthProvider,
-          targetProvider: targetBackendContext.provider,
+          targetProvider: targetBackend.backendContext.provider,
           targetProviderType,
           targetPiAuthProvider,
         })
@@ -2496,11 +2605,11 @@ export class SessionManager implements ISessionManager {
 
       if (branchContextStrategy === 'sdk-fork' && !branchFromSdkSessionId) {
         sessionLog.warn('Branch validation failed: sdk-fork requires parent SDK session ID', {
-          workspaceId,
-          branchFromSessionId: options.branchFromSessionId,
-          sourceProvider: sourceBackendContext.provider,
-          targetProvider: targetBackendContext.provider,
-        })
+            workspaceId,
+            branchFromSessionId: options.branchFromSessionId,
+            sourceProvider: sourceBackendContext.provider,
+            targetProvider: targetBackend.backendContext.provider,
+          })
         throw new Error('Cannot create branch yet: parent session SDK context is not initialized. Send one message in the parent session and try again.')
       }
 
@@ -2579,8 +2688,9 @@ export class SessionManager implements ISessionManager {
 
     // Resolve connection/provider/auth/model using the provider-agnostic backend resolver.
     // Reuse precomputed target context so branch validation and session construction share the same target identity.
-    const resolvedContext = targetBackendContext
-    const resolvedModel = resolvedContext.resolvedModel
+    const resolvedModel = targetBackend.kind === 'built-in'
+      ? targetBackend.backendContext.resolvedModel
+      : (options?.model || targetBackend.resolvedModel || defaultModel)
 
     // Log mini agent session creation
     if (options?.systemPromptPreset === 'mini' || options?.model) {
@@ -2593,7 +2703,8 @@ export class SessionManager implements ISessionManager {
       permissionMode: defaultPermissionMode,
       workingDirectory: resolvedWorkingDir,
       model: resolvedModel,
-      llmConnection: options?.llmConnection,
+      backendId: targetBackend.backendId,
+      llmConnection: targetBackend.kind === 'built-in' ? options?.llmConnection : undefined,
       thinkingLevel: defaultThinkingLevel,
       systemPromptPreset: options?.systemPromptPreset,
       enabledSourceSlugs: defaultEnabledSourceSlugs,
@@ -2686,20 +2797,25 @@ export class SessionManager implements ISessionManager {
       const end = perf.start('agent.create', { sessionId: managed.id })
 
       const workspaceConfig = loadWorkspaceConfig(managed.workspace.rootPath)
-      const backendContext = resolveBackendContext({
-        sessionConnectionSlug: managed.llmConnection,
+      const backendTarget = resolveSessionBackendTarget({
+        backendId: managed.backendId,
+        llmConnection: managed.llmConnection,
         workspaceDefaultConnectionSlug: workspaceConfig?.defaults?.defaultLlmConnection,
-        managedModel: managed.model,
+        model: managed.model,
       })
-      const connection = backendContext.connection
+      const backendContext = backendTarget.kind === 'built-in'
+        ? backendTarget.backendContext
+        : undefined
+      const connection = backendContext?.connection
+      let shouldPersistSessionMetadata = false
 
       // Lock the connection after first resolution
       // This ensures the session always uses the same provider
       if (connection && !managed.connectionLocked) {
         managed.llmConnection = connection.slug
         managed.connectionLocked = true
+        shouldPersistSessionMetadata = true
         sessionLog.info(`Locked session ${managed.id} to connection "${connection.slug}"`)
-        this.persistSession(managed)
 
         // Keep renderer session capabilities in sync when auto-locking the connection.
         this.sendEvent({
@@ -2712,9 +2828,18 @@ export class SessionManager implements ISessionManager {
         }, managed.workspace.id)
       }
 
-      const provider = backendContext.provider
+      if (managed.backendId !== backendTarget.backendId) {
+        managed.backendId = backendTarget.backendId
+        shouldPersistSessionMetadata = true
+      }
+      if (shouldPersistSessionMetadata) {
+        this.persistSession(managed)
+      }
+
       if (connection) {
         sessionLog.info(`Using LLM connection "${connection.slug}" (${connection.providerType}) for session ${managed.id}`)
+      } else if (backendTarget.kind === 'external') {
+        sessionLog.info(`Using external plugin backend "${backendTarget.backendId}" for session ${managed.id}`)
       } else {
         sessionLog.warn(`No LLM connection found for session ${managed.id}, using default anthropic provider`)
       }
@@ -2752,7 +2877,7 @@ export class SessionManager implements ISessionManager {
 
       // Backends that run as external subprocesses need an HTTP pool server
       let poolServerUrl: string | undefined
-      if (backendContext.capabilities.needsHttpPoolServer) {
+      if (backendTarget.capabilities.needsHttpPoolServer) {
         managed.poolServer = new McpPoolServer(managed.mcpPool, { debug: (msg) => sessionLog.debug(msg) })
         managed.mcpPool.onToolsChanged = () => managed.poolServer?.notifyToolsChanged()
         poolServerUrl = await managed.poolServer.start()
@@ -2880,11 +3005,9 @@ export class SessionManager implements ISessionManager {
       // Construct backend via factory
       // ============================================================
 
-      managed.agent = createBackendFromResolvedContext({
-        context: backendContext,
-        hostRuntime: buildBackendHostRuntimeContext(),
-        coreConfig: {
+      const coreConfig = {
         workspace: managed.workspace,
+        model: managed.model,
         miniModel,
         thinkingLevel: managed.thinkingLevel,
         session: sessionConfig,
@@ -2935,10 +3058,26 @@ export class SessionManager implements ISessionManager {
           enabledSlugs,
         },
         craftCapabilityInventory,
-        },
-      }) as AgentInstance
+      }
 
-      sessionLog.info(`Created ${provider} agent for session ${managed.id} (model: ${backendContext.resolvedModel})${managed.sdkSessionId ? ' (resuming)' : ''}`)
+      managed.agent = backendTarget.kind === 'external'
+        ? createExternalPluginBackend({
+          backendId: backendTarget.backendId,
+          hostRuntime: buildBackendHostRuntimeContext(),
+          coreConfig,
+        }) as AgentInstance
+        : createBackendFromResolvedContext({
+          context: backendTarget.backendContext,
+          hostRuntime: buildBackendHostRuntimeContext(),
+          coreConfig,
+          providerOptions: { piAuthProvider: backendTarget.backendContext.connection?.piAuthProvider },
+        }) as AgentInstance
+
+      sessionLog.info(
+        `Created ${backendTarget.kind === 'external' ? `${backendTarget.backendId} plugin bridge` : `${backendTarget.backendContext.provider} agent`} for session ${managed.id} ` +
+        `(model: ${backendTarget.kind === 'external' ? (managed.model || backendTarget.resolvedModel || 'default') : backendTarget.backendContext.resolvedModel})` +
+        `${managed.sdkSessionId ? ' (resuming)' : ''}`,
+      )
 
       // ============================================================
       // Post-construction: debug callback, auth callback, postInit()
@@ -3956,6 +4095,7 @@ export class SessionManager implements ISessionManager {
         `setSessionConnection: cleared incompatible model "${currentModel}" for agent "${connectionSlug}"; replacement=${managed.model ?? '(none)'}`
       )
     }
+    syncBackendIdFromConnection(managed)
     // Persist in-memory state directly to avoid race with pending queue writes
     this.persistSession(managed)
     await this.flushSession(managed.id)
@@ -4501,23 +4641,14 @@ export class SessionManager implements ISessionManager {
     let agent: AgentInstance | null = managed.agent
     let isTemporary = false
 
-    if (!agent && managed.llmConnection) {
+    if (!agent && (managed.llmConnection || managed.backendId)) {
       try {
-        const connection = getLlmConnection(managed.llmConnection)
+        const connection = managed.llmConnection ? getLlmConnection(managed.llmConnection) : undefined
         const resolvedMiniModel = connection ? (getMiniModel(connection) ?? connection.defaultModel) : undefined
 
-        agent = createBackendFromConnection(managed.llmConnection, {
-          workspace: managed.workspace,
+        agent = this.createHeadlessHelperAgent(managed, `title-${managed.id}`, {
           miniModel: resolvedMiniModel,
-          session: {
-            id: `title-${managed.id}`,
-            workspaceRootPath: managed.workspace.rootPath,
-            llmConnection: managed.llmConnection,
-            createdAt: Date.now(),
-            lastUsedAt: Date.now(),
-          },
-          isHeadless: true,
-        }, buildBackendHostRuntimeContext()) as AgentInstance
+        })
         await agent.postInit()
         isTemporary = true
         sessionLog.info(`refreshTitle: Created temporary agent for session ${sessionId}`)
@@ -4528,7 +4659,7 @@ export class SessionManager implements ISessionManager {
     }
 
     if (!agent) {
-      sessionLog.warn(`refreshTitle: No agent and no connection for session ${sessionId}`)
+      sessionLog.warn(`refreshTitle: No agent and no backend target for session ${sessionId}`)
       return { success: false, error: 'No agent available' }
     }
 
@@ -4663,11 +4794,13 @@ export class SessionManager implements ISessionManager {
       // Also update connection if provided and not already locked
       if (connection && !managed.connectionLocked) {
         managed.llmConnection = connection
+        syncBackendIdFromConnection(managed)
       }
       // Persist to disk (include connection if it was updated)
-      const updates: { model?: string; llmConnection?: string } = { model: model ?? undefined }
+      const updates: { model?: string; llmConnection?: string; backendId?: string } = { model: model ?? undefined }
       if (connection && !managed.connectionLocked) {
         updates.llmConnection = connection
+        updates.backendId = managed.backendId
       }
       await updateSessionMetadata(managed.workspace.rootPath, sessionId, updates)
       // Update agent model if it already exists (takes effect on next query)
@@ -6211,6 +6344,55 @@ export class SessionManager implements ISessionManager {
    * Uses the agent's generateTitle() method which handles provider-specific SDK calls.
    * If no agent exists, creates a temporary one using the session's connection.
    */
+  private createHeadlessHelperAgent(
+    managed: ManagedSession,
+    sessionId: string,
+    options?: {
+      model?: string
+      miniModel?: string
+      envOverrides?: Record<string, string>
+    },
+  ): AgentInstance {
+    const workspaceConfig = loadWorkspaceConfig(managed.workspace.rootPath)
+    const backendTarget = resolveSessionBackendTarget({
+      backendId: managed.backendId,
+      llmConnection: managed.llmConnection,
+      workspaceDefaultConnectionSlug: workspaceConfig?.defaults?.defaultLlmConnection,
+      model: options?.model || managed.model || workspaceConfig?.defaults?.model,
+    })
+    const hostRuntime = buildBackendHostRuntimeContext()
+    const coreConfig = {
+      workspace: managed.workspace,
+      model: options?.model || managed.model,
+      miniModel: options?.miniModel,
+      session: {
+        id: sessionId,
+        workspaceRootPath: managed.workspace.rootPath,
+        llmConnection: managed.llmConnection,
+        backendId: managed.backendId,
+        createdAt: Date.now(),
+        lastUsedAt: Date.now(),
+      },
+      envOverrides: options?.envOverrides,
+      isHeadless: true,
+    }
+
+    if (backendTarget.kind === 'external') {
+      return createExternalPluginBackend({
+        backendId: backendTarget.backendId,
+        hostRuntime,
+        coreConfig,
+      }) as AgentInstance
+    }
+
+    return createBackendFromResolvedContext({
+      context: backendTarget.backendContext,
+      hostRuntime,
+      coreConfig,
+      providerOptions: { piAuthProvider: backendTarget.backendContext.connection?.piAuthProvider },
+    }) as AgentInstance
+  }
+
   private async generateTitle(managed: ManagedSession, userMessage: string): Promise<void> {
     sessionLog.info(`[generateTitle] Starting for session ${managed.id}`)
 
@@ -6229,22 +6411,12 @@ export class SessionManager implements ISessionManager {
     }
 
     // If still no agent, create a temporary one using the session's connection
-    if (!agent && managed.llmConnection) {
+    if (!agent && (managed.llmConnection || managed.backendId)) {
       try {
-        const connection = getLlmConnection(managed.llmConnection)
-
-        agent = createBackendFromConnection(managed.llmConnection, {
-          workspace: managed.workspace,
+        const connection = managed.llmConnection ? getLlmConnection(managed.llmConnection) : undefined
+        agent = this.createHeadlessHelperAgent(managed, `title-${managed.id}`, {
           miniModel: connection ? (getMiniModel(connection) ?? connection.defaultModel) : undefined,
-          session: {
-            id: `title-${managed.id}`,
-            workspaceRootPath: managed.workspace.rootPath,
-            llmConnection: managed.llmConnection,
-            createdAt: Date.now(),
-            lastUsedAt: Date.now(),
-          },
-          isHeadless: true,
-        }, buildBackendHostRuntimeContext()) as AgentInstance
+        })
         await agent.postInit()
         isTemporary = true
         sessionLog.info(`[generateTitle] Created temporary agent for session ${managed.id}`)
@@ -6255,7 +6427,7 @@ export class SessionManager implements ISessionManager {
     }
 
     if (!agent) {
-      sessionLog.warn(`[generateTitle] No agent and no connection for session ${managed.id}`)
+      sessionLog.warn(`[generateTitle] No agent and no backend target for session ${managed.id}`)
       return
     }
 
@@ -7111,15 +7283,18 @@ export class SessionManager implements ISessionManager {
     const workspaceRootPath = managed.workspace.rootPath
     const wsConfig = loadWorkspaceConfig(workspaceRootPath)
     const defaultModel = wsConfig?.defaults?.model
-    const backendContext = resolveBackendContext({
-      sessionConnectionSlug: managed.llmConnection,
+    const backendTarget = resolveSessionBackendTarget({
+      backendId: managed.backendId,
+      llmConnection: managed.llmConnection,
       workspaceDefaultConnectionSlug: wsConfig?.defaults?.defaultLlmConnection,
-      managedModel: managed.model || defaultModel,
+      model: managed.model || defaultModel,
     })
 
-    const miniModel = backendContext.connection
-      ? (getMiniModel(backendContext.connection) ?? backendContext.connection.defaultModel ?? getDefaultSummarizationModel())
-      : getDefaultSummarizationModel()
+    const miniModel = backendTarget.kind === 'built-in' && backendTarget.backendContext.connection
+      ? (getMiniModel(backendTarget.backendContext.connection)
+        ?? backendTarget.backendContext.connection.defaultModel
+        ?? getDefaultSummarizationModel())
+      : (managed.model || getDefaultSummarizationModel())
 
     const envOverrides: Record<string, string> = {
       CRAFT_WORKSPACE_PATH: workspaceRootPath,
@@ -7127,28 +7302,10 @@ export class SessionManager implements ISessionManager {
     }
     await applyAgentCredentialEnvOverrides(backendContext.connection, envOverrides)
 
-    const agent = createBackendFromResolvedContext({
-      context: backendContext,
-      hostRuntime: buildBackendHostRuntimeContext(),
-      coreConfig: {
-        workspace: managed.workspace,
-        session: {
-          id: `${managed.id}-remote-transfer-summary`,
-          workspaceRootPath,
-          createdAt: Date.now(),
-          lastUsedAt: Date.now(),
-          workingDirectory: managed.workingDirectory,
-          sdkCwd: managed.sdkCwd,
-          model: managed.model,
-          llmConnection: managed.llmConnection,
-          permissionMode: managed.permissionMode,
-          previousPermissionMode: managed.previousPermissionMode,
-        },
-        miniModel,
-        envOverrides,
-        isHeadless: true,
-      },
-      providerOptions: { piAuthProvider: backendContext.connection?.piAuthProvider },
+    const agent = this.createHeadlessHelperAgent(managed, `${managed.id}-remote-transfer-summary`, {
+      model: managed.model || miniModel,
+      miniModel,
+      envOverrides,
     })
 
     try {
@@ -7328,6 +7485,7 @@ export class SessionManager implements ISessionManager {
       enabledSourceSlugs: header.enabledSourceSlugs,
       workingDirectory: header.workingDirectory,
       model: header.model,
+      backendId: header.backendId,
       llmConnection: header.llmConnection,
       connectionLocked: header.connectionLocked,
       thinkingLevel: header.thinkingLevel,
@@ -7365,6 +7523,7 @@ export class SessionManager implements ISessionManager {
         sessionLog.info(`[import] Fork: compatible ${sourceProviderType} connection "${compatibleConnection}" found — preserving sdkSessionId for resume`)
         storedSession.llmConnection = compatibleConnection
         storedSession.connectionLocked = false
+        syncBackendIdFromConnection(storedSession)
       } else {
         // Summary path: no compatible connection or no SDK session — clear for fresh start
         if (storedSession.llmConnection) {
@@ -7373,6 +7532,7 @@ export class SessionManager implements ISessionManager {
         storedSession.sdkSessionId = undefined
         storedSession.llmConnection = undefined
         storedSession.connectionLocked = false
+        syncBackendIdFromConnection(storedSession)
       }
       // Clear thinking level so the session inherits the workspace default
       storedSession.thinkingLevel = undefined
@@ -7401,6 +7561,7 @@ export class SessionManager implements ISessionManager {
         warnings.push(`LLM connection "${storedSession.llmConnection}" not found in target — session will use default`)
         storedSession.llmConnection = undefined
         storedSession.connectionLocked = false
+        syncBackendIdFromConnection(storedSession)
       } else {
         sessionLog.info(`[import] LLM connection "${storedSession.llmConnection}" resolved OK`)
       }

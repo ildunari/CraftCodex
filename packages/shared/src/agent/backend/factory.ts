@@ -54,6 +54,7 @@ import type {
   StoredConnectionValidationResult,
 } from './internal/driver-types.ts';
 import type { AgentBackendCapabilities } from './capabilities.ts';
+import type { CraftPluginManifest } from '../../plugins';
 import { getDefaultProviderType } from './internal/driver-types.ts';
 import {
   resolveBackendHostTooling as resolveHostToolingPaths,
@@ -65,6 +66,7 @@ import { acpDriver } from './internal/drivers/acp.ts';
 import { AcpAgent } from '../acp-agent.ts';
 import { codexDriver } from './internal/drivers/codex.ts';
 import { CodexAgent } from '../codex-agent.ts';
+import { BridgePluginAgent } from '../plugin-bridge-agent.ts';
 
 const DRIVER_REGISTRY: Record<AgentProvider, ProviderDriver> = {
   anthropic: anthropicDriver,
@@ -72,6 +74,144 @@ const DRIVER_REGISTRY: Record<AgentProvider, ProviderDriver> = {
   acp: acpDriver,
   codex: codexDriver,
 };
+
+export interface ExternalPluginBackendRegistration {
+  backendId: string
+  pluginId: string
+  helperPath: string
+  helperRuntimePath?: string
+  defaultModel?: string
+  supportsBranching?: boolean
+  needsHttpPoolServer?: boolean
+  envOverrides?: Record<string, string>
+}
+
+const EXTERNAL_PLUGIN_BACKENDS = new Map<string, ExternalPluginBackendRegistration>()
+
+const BUILTIN_BACKEND_PLUGIN_METADATA: Record<AgentProvider, {
+  pluginId: string
+  pluginName: string
+  description: string
+}> = {
+  anthropic: {
+    pluginId: 'craft.backend.anthropic',
+    pluginName: 'Anthropic Backend',
+    description: 'Built-in Anthropic backend support.',
+  },
+  pi: {
+    pluginId: 'craft.backend.pi',
+    pluginName: 'Pi Backend',
+    description: 'Built-in Pi backend support.',
+  },
+};
+
+export function getBuiltInBackendId(provider: AgentProvider): string {
+  return provider;
+}
+
+export function registerExternalPluginBackend(
+  definition: ExternalPluginBackendRegistration,
+): void {
+  EXTERNAL_PLUGIN_BACKENDS.set(definition.backendId, definition)
+}
+
+export function unregisterExternalPluginBackend(backendId: string): void {
+  EXTERNAL_PLUGIN_BACKENDS.delete(backendId)
+}
+
+export function getExternalPluginBackend(
+  backendId: string,
+): ExternalPluginBackendRegistration | undefined {
+  return EXTERNAL_PLUGIN_BACKENDS.get(backendId)
+}
+
+export function listExternalPluginBackends(): ExternalPluginBackendRegistration[] {
+  return [...EXTERNAL_PLUGIN_BACKENDS.values()]
+}
+
+export function clearExternalPluginBackendsForTests(): void {
+  EXTERNAL_PLUGIN_BACKENDS.clear()
+}
+
+export function createExternalPluginBackend(args: {
+  backendId: string
+  coreConfig: CoreBackendConfig
+  hostRuntime: BackendHostRuntimeContext
+}): AgentBackend {
+  const definition = getExternalPluginBackend(args.backendId)
+  if (!definition) {
+    throw new Error(`External plugin backend not registered: ${args.backendId}`)
+  }
+
+  return new BridgePluginAgent({
+    provider: 'pi',
+    providerType: 'pi',
+    authType: 'oauth',
+    workspace: args.coreConfig.workspace,
+    session: args.coreConfig.session,
+    model: args.coreConfig.model || definition.defaultModel || 'gpt-5.4',
+    miniModel: args.coreConfig.miniModel,
+    thinkingLevel: args.coreConfig.thinkingLevel,
+    isHeadless: args.coreConfig.isHeadless,
+    debugMode: args.coreConfig.debugMode,
+    systemPromptPreset: args.coreConfig.systemPromptPreset,
+    automationSystem: args.coreConfig.automationSystem,
+    envOverrides: {
+      ...definition.envOverrides,
+      ...args.coreConfig.envOverrides,
+    },
+    mcpPool: args.coreConfig.mcpPool,
+    poolServerUrl: args.coreConfig.poolServerUrl,
+    onSdkSessionIdUpdate: args.coreConfig.onSdkSessionIdUpdate,
+    onSdkSessionIdCleared: args.coreConfig.onSdkSessionIdCleared,
+    getRecoveryMessages: args.coreConfig.getRecoveryMessages,
+    getBranchFallbackMessages: args.coreConfig.getBranchFallbackMessages,
+    getBranchSeedMessages: args.coreConfig.getBranchSeedMessages,
+    markBranchSeedApplied: args.coreConfig.markBranchSeedApplied,
+    getTransferredSessionSummary: args.coreConfig.getTransferredSessionSummary,
+    markTransferredSessionSummaryApplied: args.coreConfig.markTransferredSessionSummaryApplied,
+    onImageResize: args.coreConfig.onImageResize,
+    enable1MContext: args.coreConfig.enable1MContext,
+    initialSources: args.coreConfig.initialSources,
+    runtime: {
+      pluginBridge: {
+        pluginId: definition.pluginId,
+        backendId: definition.backendId,
+        helperPath: definition.helperPath,
+        helperRuntimePath: definition.helperRuntimePath
+          || args.hostRuntime.nodeRuntimePath
+          || process.execPath,
+      },
+    },
+  })
+}
+
+export function inferBackendIdFromConnectionSlug(connectionSlug?: string): string | undefined {
+  if (!connectionSlug) return undefined;
+  const connection = getLlmConnection(connectionSlug);
+  return connection ? providerTypeToAgentProvider(connection.providerType) : undefined;
+}
+
+export function createBuiltInBackendPluginManifests(args: {
+  appVersion: string;
+  pluginApiVersion: string;
+}): CraftPluginManifest[] {
+  return getAvailableProviders().map((provider) => {
+    const metadata = BUILTIN_BACKEND_PLUGIN_METADATA[provider];
+    return {
+      id: metadata.pluginId,
+      name: metadata.pluginName,
+      version: args.appVersion,
+      apiVersion: args.pluginApiVersion,
+      description: metadata.description,
+      engines: { craftAgents: '*' },
+      permissions: ['session.read', 'session.write'],
+      contributions: {
+        backends: [getBuiltInBackendId(provider)],
+      },
+    };
+  });
+}
 
 function getProviderDriver(provider: AgentProvider): ProviderDriver {
   const driver = DRIVER_REGISTRY[provider];
@@ -689,6 +829,18 @@ export const BACKEND_CAPABILITIES: Record<AgentProvider, AgentBackendCapabilitie
     supportsHealthCheck: true,
   },
 };
+
+export function getExternalBackendCapabilities(backendId: string): {
+  needsHttpPoolServer: boolean
+  supportsBranching: boolean
+} | undefined {
+  const definition = getExternalPluginBackend(backendId)
+  if (!definition) return undefined
+  return {
+    needsHttpPoolServer: definition.needsHttpPoolServer ?? false,
+    supportsBranching: definition.supportsBranching ?? false,
+  }
+}
 
 // ============================================================
 // Auth Type Resolution

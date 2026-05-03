@@ -74,6 +74,7 @@ import { CHAT_LAYOUT } from "@/config/layout"
 import { collectFileChangesFromActivities, getFirstFileChangeIdForActivity } from "@/lib/file-changes"
 import { resolveBranchNewPanelOption } from "./branching"
 import { handleErrorMessageAction } from "./error-message-actions"
+import { PluginChatCards, matchPluginChatCardsForTurn, usePluginChatCardTypes } from "@/components/plugins"
 
 // ============================================================================
 // CSS Custom Highlight API helper
@@ -492,6 +493,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
 
   // Panel focus state (for multi-panel auto-scroll behavior)
   const appShellContext = useAppShellContext()
+  const pluginChatCardTypes = usePluginChatCardTypes()
   const isFocusedPanel = appShellContext?.isFocusedPanel ?? true
 
   // Input is only disabled when explicitly disabled (e.g., agent needs activation)
@@ -1672,6 +1674,11 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
 
                     // Check if this is the last response (for Accept Plan button visibility)
                     const isLastResponse = index === turns.length - 1 || !turns.slice(index + 1).some(t => t.type === 'user')
+                    const matchedPluginChatCards = matchPluginChatCardsForTurn({
+                      capabilities: pluginChatCardTypes,
+                      activities: turn.activities,
+                      response: turn.response,
+                    })
 
                     // Assistant turns - render with TurnCard (buffered streaming)
                     const assistantUiKey = getAssistantTurnUiKey(turn, index)
@@ -1865,6 +1872,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                           }
                         }}
                       />
+                      <PluginChatCards capabilities={matchedPluginChatCards} />
                       </div>
                     )
                   })}

@@ -29,8 +29,11 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { readFileSync, existsSync } from 'node:fs'
 import { version as packageVersion } from '../package.json'
+import { createBuiltInBackendPluginManifests } from '@craft-agent/shared/agent/backend'
+import { createBuiltInUiPluginManifest } from '@craft-agent/shared/plugins'
 import { enableDebug } from '@craft-agent/shared/utils/debug'
 import { bootstrapServer, startHealthHttpServer, generateServerToken } from '@craft-agent/server-core/bootstrap'
+import { PLUGIN_API_VERSION, bootstrapPluginHost } from '@craft-agent/server-core/plugins'
 import { validateSession, createWebuiHandler, nodeHttpAdapter } from '@craft-agent/server-core/webui'
 import type { WebuiHandler } from '@craft-agent/server-core/webui'
 import { getCredentialManager } from '@craft-agent/shared/credentials'
@@ -163,11 +166,29 @@ const waNodeBin = process.env.CRAFT_MESSAGING_NODE_BIN ?? 'node'
 // publisher after bootstrapServer resolves.
 let messagingHandle: MessagingBootstrapHandle | null = null
 
+const serverVersion = process.env.CRAFT_VERSION ?? packageVersion
+
 const instance = await (async () => {
   try {
+    const pluginHost = await bootstrapPluginHost({
+      appVersion: serverVersion,
+      pluginApiVersion: PLUGIN_API_VERSION,
+      builtInManifests: [
+        ...createBuiltInBackendPluginManifests({
+          appVersion: serverVersion,
+          pluginApiVersion: PLUGIN_API_VERSION,
+        }),
+        createBuiltInUiPluginManifest({
+          appVersion: serverVersion,
+          pluginApiVersion: PLUGIN_API_VERSION,
+        }),
+      ],
+      logger: console,
+    })
+
     return await bootstrapServer<SessionManager, HandlerDeps>({
       bundledAssetsRoot,
-      serverVersion: process.env.CRAFT_VERSION ?? packageVersion,
+      serverVersion,
       tls,
       // When web UI is enabled, accept JWT session cookies on WebSocket upgrade
       validateSessionCookie: webuiEnabled && serverToken
@@ -223,6 +244,7 @@ const instance = await (async () => {
           platform,
           oauthFlowStore,
           messagingRegistry: messagingHandle.registry,
+          pluginHost,
         }
       },
       registerAllRpcHandlers: registerCoreRpcHandlers,
