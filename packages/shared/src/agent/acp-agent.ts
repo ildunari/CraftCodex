@@ -185,9 +185,14 @@ export class AcpAgent extends BaseAgent {
   private promptQueue = new AcpPromptQueue();
 
   private static readonly DEFAULT_TIMEOUTS = {
-    initialize: 10_000,
-    sessionNew: 10_000,
-    sessionLoad: 10_000,
+    // Cold-start budget — agents like droid spawn a node runtime, hydrate
+    // their config, and may probe auth before responding to `initialize`.
+    // Real-world cold starts have been seen at 8–20s on first launch, so a
+    // 10s ceiling produced spurious "ACP initialize timed out" errors after
+    // a fresh app launch (especially on packaged builds with no warm caches).
+    initialize: 45_000,
+    sessionNew: 30_000,
+    sessionLoad: 30_000,
     sessionCancel: 2_000,
     prompt: 0, // unbounded by default; long turns are normal
   } as const;
