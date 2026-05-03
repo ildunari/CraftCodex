@@ -259,8 +259,32 @@ export interface LlmConnectionWithStatus extends LlmConnection {
  * @param connection - LLM connection (or partial with models + providerType)
  * @returns Model ID string, or undefined if no models available
  */
-export function getMiniModel(connection: Pick<LlmConnection, 'models' | 'providerType'>): string | undefined {
+export function getMiniModel(
+  connection: Pick<LlmConnection, 'models' | 'providerType' | 'piAuthProvider'>,
+): string | undefined {
   return findSmallModel(connection);
+}
+
+/**
+ * Returns true if the model ID should never be used as a mini/utility model
+ * for the given auth provider.
+ *
+ * Currently denies:
+ *   - `codex-mini-latest` for any provider (the Codex CLI bundles it but it
+ *     isn't usable as a generic mini model — it's tuned for code review and
+ *     refuses arbitrary completions).
+ *   - `*codex-mini*` under `openai-codex` (ChatGPT-account auth) because
+ *     ChatGPT-account access for OpenAI's Codex models is gated separately
+ *     from API-key access and we can't predict which the user has.
+ *
+ * Re-exported by `pi-agent-server/src/model-resolution.ts` as the single
+ * source of truth used both at registration time and selection time.
+ */
+export function isDeniedMiniModelId(modelId: string, piAuthProvider?: string): boolean {
+  const bare = modelId.startsWith('pi/') ? modelId.slice(3) : modelId;
+  if (bare === 'codex-mini-latest') return true;
+  if (piAuthProvider === 'openai-codex' && bare.includes('codex-mini')) return true;
+  return false;
 }
 
 /**
@@ -273,7 +297,9 @@ export function getMiniModel(connection: Pick<LlmConnection, 'models' | 'provide
  * @param connection - LLM connection (or partial with models + providerType)
  * @returns Model ID string, or undefined if no models available
  */
-export function getSummarizationModel(connection: Pick<LlmConnection, 'models' | 'providerType'>): string | undefined {
+export function getSummarizationModel(
+  connection: Pick<LlmConnection, 'models' | 'providerType' | 'piAuthProvider'>,
+): string | undefined {
   return findSmallModel(connection);
 }
 
@@ -285,7 +311,9 @@ export function getSummarizationModel(connection: Pick<LlmConnection, 'models' |
  *   - Pi: find "mini" or "flash"
  *   - Otherwise: last model in the list
  */
-function findSmallModel(connection: Pick<LlmConnection, 'models' | 'providerType'>): string | undefined {
+function findSmallModel(
+  connection: Pick<LlmConnection, 'models' | 'providerType' | 'piAuthProvider'>,
+): string | undefined {
   if (!connection.models || connection.models.length === 0) return undefined;
 
   const toId = (m: ModelDefinition | string) => typeof m === 'string' ? m : m.id;
@@ -293,12 +321,8 @@ function findSmallModel(connection: Pick<LlmConnection, 'models' | 'providerType
   const toSearchStr = (m: ModelDefinition | string) =>
     typeof m === 'string' ? m.toLowerCase() : `${m.id} ${m.name} ${m.shortName}`.toLowerCase();
 
-  const isDeniedSmallModel = (modelId: string): boolean => {
-    const bare = modelId.startsWith('pi/') ? modelId.slice(3) : modelId;
-    return bare === 'codex-mini-latest';
-  };
-
-  const isAllowedModel = (m: ModelDefinition | string): boolean => !isDeniedSmallModel(toId(m));
+  const isAllowedModel = (m: ModelDefinition | string): boolean =>
+    !isDeniedMiniModelId(toId(m), connection.piAuthProvider);
 
   // Provider-aware keyword search
   const keywords: string[] = [];
