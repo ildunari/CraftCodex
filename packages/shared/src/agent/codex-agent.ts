@@ -80,6 +80,7 @@ export class CodexAgent extends BaseAgent {
   private activeTurnId: string | null = null;
   private abortReason?: AbortReason;
   private currentTurnText = '';
+  private hasEmittedTextComplete = false;
   private runtimeHome: CodexRuntimeHomeResult | null = null;
   private nativeInventory: NativeCapabilityInventory | null = null;
   private pendingPermissions = new Map<string, {
@@ -134,6 +135,7 @@ export class CodexAgent extends BaseAgent {
     this.abortReason = undefined;
     this.eventQueue.reset();
     this.currentTurnText = '';
+    this.hasEmittedTextComplete = false;
 
     try {
       await this.ensureSubprocess();
@@ -192,6 +194,7 @@ export class CodexAgent extends BaseAgent {
     const previousThreadId = this.codexThreadId;
     this.eventQueue.reset();
     this.currentTurnText = '';
+    this.hasEmittedTextComplete = false;
     await this.ensureThread(true);
 
     try {
@@ -663,7 +666,8 @@ export class CodexAgent extends BaseAgent {
               message: typeof error?.message === 'string' ? error.message : 'Codex turn failed',
             });
           }
-          if (this.currentTurnText) {
+          if (this.currentTurnText && !this.hasEmittedTextComplete) {
+            this.hasEmittedTextComplete = true;
             this.eventQueue.enqueue({
               type: 'text_complete',
               text: this.currentTurnText,

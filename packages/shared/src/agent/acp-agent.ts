@@ -175,32 +175,63 @@ function extractAcpStatusText(update: Record<string, unknown> | null): string | 
 
 export function extractAcpText(value: unknown): string[] {
   const texts: string[] = [];
-  const seen = new Set<unknown>();
 
-  const visit = (node: unknown, keyHint?: string): void => {
-    if (node == null) return;
-    if (typeof node === 'string') {
-      if (keyHint && /^(text|delta|content|message|output|summary)$/i.test(keyHint)) {
-        texts.push(node);
-      }
-      return;
-    }
-    if (typeof node !== 'object') return;
-    if (seen.has(node)) return;
-    seen.add(node);
-
-    if (Array.isArray(node)) {
-      for (const item of node) visit(item, keyHint);
-      return;
-    }
-
-    for (const [key, child] of Object.entries(node as Record<string, unknown>)) {
-      visit(child, key);
+  const push = (candidate: unknown): void => {
+    if (typeof candidate === 'string' && candidate.trim().length > 0) {
+      texts.push(candidate);
     }
   };
 
-  visit(value);
-  return texts.filter(text => text.trim().length > 0);
+  const visitContent = (node: unknown): void => {
+    if (typeof node === 'string') {
+      push(node);
+      return;
+    }
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        const itemRecord = asRecord(item);
+        if (!itemRecord) continue;
+        if (itemRecord.type === 'text' || typeof itemRecord.text === 'string') {
+          push(itemRecord.text);
+        }
+      }
+      return;
+    }
+    const record = asRecord(node);
+    if (!record) return;
+    push(record.text);
+  };
+
+  const visitMessage = (node: unknown): void => {
+    if (typeof node === 'string') {
+      push(node);
+      return;
+    }
+    const record = asRecord(node);
+    if (!record) return;
+    push(record.text);
+    const delta = record.delta;
+    if (typeof delta === 'string') push(delta);
+    else push(asRecord(delta)?.text);
+    visitContent(record.content);
+  };
+
+  const record = asRecord(value);
+  if (!record) return typeof value === 'string' && value.trim().length > 0 ? [value] : [];
+
+  push(record.text);
+  const delta = record.delta;
+  if (typeof delta === 'string') push(delta);
+  else push(asRecord(delta)?.text);
+  visitContent(record.content);
+  visitMessage(record.message);
+  visitMessage(record.agentMessage);
+  visitMessage(record.agent_message);
+  visitMessage(record.assistantMessage);
+  visitMessage(record.assistant_message);
+  push(record.output);
+
+  return texts;
 }
 
 export class AcpAgent extends BaseAgent {
@@ -688,7 +719,16 @@ export class AcpAgent extends BaseAgent {
   private combineStreamAndResult(streamed: string, result: string): string {
     if (!streamed) return result;
     if (!result) return streamed;
-    return result.startsWith(streamed) ? result : `${streamed}${result}`;
+    if (streamed === result) return streamed;
+    if (result.startsWith(streamed)) return result;
+    if (streamed.endsWith(result)) return streamed;
+    const maxOverlap = Math.min(streamed.length, result.length);
+    for (let size = maxOverlap; size > 0; size--) {
+      if (streamed.slice(-size) === result.slice(0, size)) {
+        return `${streamed}${result.slice(size)}`;
+      }
+    }
+    return `${streamed}${result}`;
   }
 
   private buildCraftContext(): string {

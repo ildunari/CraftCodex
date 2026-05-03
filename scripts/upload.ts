@@ -100,6 +100,73 @@ async function run(cmd: string[], dryRun: boolean): Promise<void> {
   }
 }
 
+async function commandOutput(cmd: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+  const proc = Bun.spawn({ cmd, stdout: 'pipe', stderr: 'pipe' })
+  const [code, stdout, stderr] = await Promise.all([
+    proc.exited,
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ])
+  return { code, stdout, stderr }
+}
+
+async function assertSignedMacRelease(files: Array<{ path: string; keyName: string }>, options: UploadOptions): Promise<void> {
+  if (!options.electron || options.dryRun) return
+  if (process.env.ALLOW_UNSIGNED_CRAFTCODEX_RELEASE === '1') {
+    console.warn('warning: ALLOW_UNSIGNED_CRAFTCODEX_RELEASE=1 set; skipping macOS signing gate')
+    return
+  }
+
+  const hasMacArtifact = files.some(file =>
+    file.keyName.endsWith('.dmg') ||
+    file.keyName.endsWith('.zip') ||
+    file.keyName === 'latest-mac.yml'
+  )
+  if (!hasMacArtifact) return
+
+  if (process.platform !== 'darwin') {
+    throw new Error('macOS release artifacts must be signed/notarization-checked on macOS before upload.')
+  }
+
+  const appCandidates = [
+    join(ELECTRON_RELEASE_DIR, 'mac-arm64', 'CraftCodex.app'),
+    join(ELECTRON_RELEASE_DIR, 'mac', 'CraftCodex.app'),
+  ]
+  const appPath = appCandidates.find(existsSync)
+  if (!appPath) {
+    throw new Error(`Cannot verify macOS signing: no packaged CraftCodex.app found under ${ELECTRON_RELEASE_DIR}`)
+  }
+
+  const codesign = await commandOutput(['codesign', '-dv', '--verbose=4', appPath])
+  const signatureOutput = `${codesign.stdout}\n${codesign.stderr}`
+  if (
+    codesign.code !== 0 ||
+    signatureOutput.includes('Signature=adhoc') ||
+    signatureOutput.includes('TeamIdentifier=not set')
+  ) {
+    throw new Error([
+      'Refusing to upload unsigned/ad-hoc CraftCodex macOS artifacts.',
+      'Auto-updates require consistently signed app bundles for quitAndInstall().',
+      'Set CSC_LINK, CSC_NAME, or APPLE_SIGNING_IDENTITY before building.',
+      'Use ALLOW_UNSIGNED_CRAFTCODEX_RELEASE=1 only for private non-update smoke artifacts.',
+    ].join('\n'))
+  }
+
+  if (process.env.CRAFTCODEX_SKIP_NOTARIZATION_CHECK === '1') {
+    console.warn('warning: CRAFTCODEX_SKIP_NOTARIZATION_CHECK=1 set; skipping spctl notarization gate')
+    return
+  }
+
+  const spctl = await commandOutput(['spctl', '-a', '-vvv', '-t', 'exec', appPath])
+  if (spctl.code !== 0) {
+    throw new Error([
+      'Refusing to upload macOS artifacts that Gatekeeper rejects.',
+      spctl.stderr.trim() || spctl.stdout.trim(),
+      'Notarize/staple the app, or set CRAFTCODEX_SKIP_NOTARIZATION_CHECK=1 only if this is an internal update feed.',
+    ].join('\n'))
+  }
+}
+
 async function ensureGithubRelease(repo: string, tag: string, dryRun: boolean): Promise<void> {
   if (dryRun) {
     console.log(`[dry-run] ensure GitHub release ${repo}@${tag}`)
@@ -212,6 +279,8 @@ async function main(): Promise<void> {
   if (files.length === 0) {
     throw new Error(`No upload artifacts found in ${ELECTRON_RELEASE_DIR}`)
   }
+
+  await assertSignedMacRelease(files, options)
 
   if (options.provider === 'github') {
     await uploadGithub(files, options)

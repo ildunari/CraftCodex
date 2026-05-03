@@ -1,5 +1,5 @@
 import { RPC_CHANNELS, type AgentCatalogActionResult, type AgentCatalogStatus, type LlmConnectionSetup } from '@craft-agent/shared/protocol'
-import { getLlmConnections, getLlmConnection, addLlmConnection, updateLlmConnection, deleteLlmConnection, getDefaultLlmConnection, setDefaultLlmConnection, touchLlmConnection, isCompatProvider, isAnthropicProvider, getDefaultModelsForConnection, getDefaultModelForConnection, AGENT_CATALOG, createConnectionForAgent, getAgentCatalogEntry, DROID_FACTORY_API_KEY_URL, type AgentCatalogId, type LlmConnection, type LlmConnectionWithStatus, toBedrockNativeId } from '@craft-agent/shared/config'
+import { getLlmConnections, getLlmConnection, addLlmConnection, updateLlmConnection, deleteLlmConnection, getDefaultLlmConnection, setDefaultLlmConnection, touchLlmConnection, isCompatProvider, isAnthropicProvider, getDefaultModelsForConnection, getDefaultModelForConnection, AGENT_CATALOG, createConnectionForAgent, getAgentCatalogEntry, DROID_FACTORY_API_KEY_URL, CONFIG_DIR, type AgentCatalogId, type LlmConnection, type LlmConnectionWithStatus, toBedrockNativeId } from '@craft-agent/shared/config'
 import { getCredentialManager } from '@craft-agent/shared/credentials'
 import { setSetupDeferred } from '@craft-agent/shared/config/storage'
 import {
@@ -15,9 +15,37 @@ import type { HandlerDeps } from '../handler-deps'
 import { randomUUID } from 'node:crypto'
 import { CLIENT_OPEN_EXTERNAL } from '@craft-agent/server-core/transport'
 import { spawn } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 
 // Local OAuth state
 let copilotOAuthAbort: AbortController | null = null
+
+const AGENT_CATALOG_STATUS_CACHE_FILE = join(CONFIG_DIR, 'agent-catalog-status-cache.json')
+const AGENT_CATALOG_STATUS_CACHE_VERSION = 1
+const AGENT_CATALOG_STATUS_CACHE_FRESH_MS = 5 * 60 * 1000
+const AGENT_CATALOG_STATUS_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000
+
+interface ListAgentCatalogOptions {
+  forceRefresh?: boolean
+}
+
+export type CachedAgentCatalogStatus = Pick<
+  AgentCatalogStatus,
+  'id' | 'status' | 'connectionSlug' | 'installed' | 'configured' | 'ready' | 'message'
+>
+
+export interface AgentCatalogStatusCache {
+  version: typeof AGENT_CATALOG_STATUS_CACHE_VERSION
+  updatedAt: number
+  connectionSignature: string
+  statuses: CachedAgentCatalogStatus[]
+}
+
+let agentCatalogStatusCacheLoaded = false
+let agentCatalogStatusCache: AgentCatalogStatusCache | null = null
+let agentCatalogStatusRefreshPromise: Promise<AgentCatalogStatus[]> | null = null
+let agentCatalogStatusRefreshSignature: string | null = null
 
 function runCommandProbe(command: string, args: string[], acceptAnyExit: boolean, timeoutMs = 3000): Promise<boolean> {
   return new Promise((resolve) => {
@@ -176,6 +204,7 @@ function syncDroidByokModels(connection: LlmConnection): LlmConnection {
 function inferCuratedAgentId(conn: LlmConnection): AgentCatalogId | null {
   if (conn.agentId) return conn.agentId
   if (conn.providerType === 'codex') return 'codex'
+  if (conn.providerType === 'pi' && conn.piAuthProvider === 'openai-codex') return 'pi'
   if (conn.providerType !== 'acp') return null
   const command = (conn.acpCommand || '').toLowerCase()
   const args = (conn.acpArgs || []).join(' ').toLowerCase()
@@ -185,6 +214,98 @@ function inferCuratedAgentId(conn: LlmConnection): AgentCatalogId | null {
   if (name.includes('hermes')) return 'hermes'
   if (name.includes('droid')) return 'droid'
   return null
+}
+
+function getVisibleAgentCatalogEntries() {
+  return AGENT_CATALOG.filter(entry => entry.showInAgentManager !== false)
+}
+
+export function createAgentCatalogConnectionSignature(connections: LlmConnection[]): string {
+  return JSON.stringify(
+    connections
+      .map(connection => ({
+        slug: connection.slug,
+        agentId: connection.agentId,
+        providerType: connection.providerType,
+        authType: connection.authType,
+        piAuthProvider: connection.piAuthProvider,
+        acpCommand: connection.acpCommand,
+        acpArgs: connection.acpArgs,
+        codexCommand: connection.codexCommand,
+        codexArgs: connection.codexArgs,
+        name: connection.name,
+      }))
+      .sort((a, b) => a.slug.localeCompare(b.slug)),
+  )
+}
+
+function isAgentCatalogStatusCache(value: unknown): value is AgentCatalogStatusCache {
+  if (!value || typeof value !== 'object') return false
+  const cache = value as Partial<AgentCatalogStatusCache>
+  return cache.version === AGENT_CATALOG_STATUS_CACHE_VERSION
+    && typeof cache.updatedAt === 'number'
+    && typeof cache.connectionSignature === 'string'
+    && Array.isArray(cache.statuses)
+}
+
+function loadAgentCatalogStatusCache(): AgentCatalogStatusCache | null {
+  if (agentCatalogStatusCacheLoaded) return agentCatalogStatusCache
+  agentCatalogStatusCacheLoaded = true
+  try {
+    if (!existsSync(AGENT_CATALOG_STATUS_CACHE_FILE)) return null
+    const parsed = JSON.parse(readFileSync(AGENT_CATALOG_STATUS_CACHE_FILE, 'utf-8'))
+    if (isAgentCatalogStatusCache(parsed)) {
+      agentCatalogStatusCache = parsed
+    }
+  } catch {
+    agentCatalogStatusCache = null
+  }
+  return agentCatalogStatusCache
+}
+
+function persistAgentCatalogStatusCache(cache: AgentCatalogStatusCache): void {
+  agentCatalogStatusCache = cache
+  agentCatalogStatusCacheLoaded = true
+  try {
+    mkdirSync(dirname(AGENT_CATALOG_STATUS_CACHE_FILE), { recursive: true })
+    writeFileSync(AGENT_CATALOG_STATUS_CACHE_FILE, `${JSON.stringify(cache, null, 2)}\n`, 'utf-8')
+  } catch {
+    // Best-effort cache only. Runtime probing remains the source of truth.
+  }
+}
+
+export function hydrateAgentCatalogStatusCache(cache: AgentCatalogStatusCache, connections: LlmConnection[], now = Date.now()): AgentCatalogStatus[] | null {
+  if (cache.connectionSignature !== createAgentCatalogConnectionSignature(connections)) return null
+  if (now - cache.updatedAt > AGENT_CATALOG_STATUS_CACHE_MAX_AGE_MS) return null
+
+  const visibleEntries = getVisibleAgentCatalogEntries()
+  const cachedById = new Map(cache.statuses.map(status => [status.id, status]))
+  if (visibleEntries.some(entry => !cachedById.has(entry.id))) return null
+
+  return visibleEntries.map(entry => {
+    const cached = cachedById.get(entry.id)!
+    return {
+      ...entry,
+      status: cached.status,
+      connectionSlug: cached.connectionSlug,
+      installed: cached.installed,
+      configured: cached.configured,
+      ready: cached.ready,
+      message: cached.message,
+    }
+  })
+}
+
+function getCachedAgentCatalogStatuses(connections: LlmConnection[], now = Date.now()): AgentCatalogStatus[] | null {
+  const cache = loadAgentCatalogStatusCache()
+  return cache ? hydrateAgentCatalogStatusCache(cache, connections, now) : null
+}
+
+function shouldRefreshAgentCatalogCache(connections: LlmConnection[], now = Date.now()): boolean {
+  const cache = loadAgentCatalogStatusCache()
+  if (!cache) return true
+  if (!hydrateAgentCatalogStatusCache(cache, connections, now)) return true
+  return now - cache.updatedAt > AGENT_CATALOG_STATUS_CACHE_FRESH_MS
 }
 
 async function resolveAgentCatalogStatus(entryId: AgentCatalogId, connections = getLlmConnections()): Promise<AgentCatalogStatus> {
@@ -266,6 +387,53 @@ async function resolveAgentCatalogStatusSafe(
   }
 }
 
+async function refreshAgentCatalogStatusCache(connections = getLlmConnections()): Promise<AgentCatalogStatus[]> {
+  const connectionSignature = createAgentCatalogConnectionSignature(connections)
+  if (agentCatalogStatusRefreshPromise) {
+    if (agentCatalogStatusRefreshSignature === connectionSignature) {
+      return agentCatalogStatusRefreshPromise
+    }
+    await agentCatalogStatusRefreshPromise.catch(() => null)
+  }
+
+  agentCatalogStatusRefreshPromise = Promise.all(
+    getVisibleAgentCatalogEntries()
+      .map(entry => resolveAgentCatalogStatusSafe(entry, connections))
+  ).then(statuses => {
+    persistAgentCatalogStatusCache({
+      version: AGENT_CATALOG_STATUS_CACHE_VERSION,
+      updatedAt: Date.now(),
+      connectionSignature,
+      statuses: statuses.map(status => ({
+        id: status.id,
+        status: status.status,
+        connectionSlug: status.connectionSlug,
+        installed: status.installed,
+        configured: status.configured,
+        ready: status.ready,
+        message: status.message,
+      })),
+    })
+    return statuses
+  }).finally(() => {
+    agentCatalogStatusRefreshPromise = null
+    agentCatalogStatusRefreshSignature = null
+  })
+  agentCatalogStatusRefreshSignature = connectionSignature
+
+  return agentCatalogStatusRefreshPromise
+}
+
+function invalidateAgentCatalogStatusCache(): void {
+  agentCatalogStatusCache = null
+  agentCatalogStatusCacheLoaded = true
+  try {
+    rmSync(AGENT_CATALOG_STATUS_CACHE_FILE, { force: true })
+  } catch {
+    // Best-effort cache invalidation only.
+  }
+}
+
 async function resolveCommandBackedConnectionStatus(conn: LlmConnection): Promise<Pick<LlmConnectionWithStatus, 'isAuthenticated' | 'authError' | 'agentStatus'>> {
   const agentId = inferCuratedAgentId(conn)
   if (!agentId) {
@@ -282,7 +450,8 @@ async function resolveCommandBackedConnectionStatus(conn: LlmConnection): Promis
   if (!entry) {
     return { isAuthenticated: false, authError: `Unknown agent "${agentId}"`, agentStatus: 'broken' }
   }
-  const status = await resolveAgentCatalogStatus(entry.id)
+  const cachedStatus = getCachedAgentCatalogStatuses(getLlmConnections())?.find(status => status.id === entry.id)
+  const status = cachedStatus ?? await resolveAgentCatalogStatus(entry.id)
   return {
     isAuthenticated: status.ready,
     authError: status.ready ? undefined : status.message,
@@ -559,6 +728,7 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
 
       // Clear "Setup later" flag now that user has configured a provider
       setSetupDeferred(false)
+      invalidateAgentCatalogStatusCache()
 
       return { success: true }
     } catch (error) {
@@ -718,6 +888,7 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
           return { success: false, error: 'Connection with this slug already exists' }
         }
       }
+      invalidateAgentCatalogStatusCache()
       deps.platform.logger?.info(`LLM connection saved: ${connection.slug}`)
       // Reinitialize auth if the saved connection is the current default
       // (updates env vars and summarization model override)
@@ -742,6 +913,7 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
       // deleteLlmConnection handles the "at least one must remain" check
       const success = deleteLlmConnection(slug)
       if (success) {
+        invalidateAgentCatalogStatusCache()
         // Stop any periodic model refresh timer for this connection
         getModelRefreshService().stopConnection(slug)
         // Also delete associated credentials
@@ -876,13 +1048,18 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
     }
   })
 
-  server.handle(RPC_CHANNELS.llmConnections.LIST_AGENT_CATALOG, async (): Promise<AgentCatalogStatus[]> => {
+  server.handle(RPC_CHANNELS.llmConnections.LIST_AGENT_CATALOG, async (_ctx, options?: ListAgentCatalogOptions): Promise<AgentCatalogStatus[]> => {
     const connections = getLlmConnections()
-    return Promise.all(
-      AGENT_CATALOG
-        .filter(entry => entry.showInAgentManager !== false)
-        .map(entry => resolveAgentCatalogStatusSafe(entry, connections))
-    )
+    if (!options?.forceRefresh) {
+      const cached = getCachedAgentCatalogStatuses(connections)
+      if (cached) {
+        if (shouldRefreshAgentCatalogCache(connections)) {
+          void refreshAgentCatalogStatusCache(connections)
+        }
+        return cached
+      }
+    }
+    return refreshAgentCatalogStatusCache(connections)
   })
 
   server.handle(RPC_CHANNELS.llmConnections.ENABLE_AGENT, async (_ctx, agentId: AgentCatalogId): Promise<AgentCatalogActionResult> => {
@@ -915,12 +1092,14 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
           defaultModel: entry.id === 'droid' && defaults.defaultModel ? defaults.defaultModel : existing.defaultModel || defaults.defaultModel,
           name: existing.name || entry.name,
         })
+        invalidateAgentCatalogStatusCache()
         return success
           ? { success: true, connectionSlug: existing.slug, message: `${entry.name} is enabled.` }
           : { success: false, error: `Failed to update ${entry.name}` }
       }
 
       const added = addLlmConnection(defaults)
+      invalidateAgentCatalogStatusCache()
       if (!added) {
         return { success: false, error: `Failed to add ${entry.name}` }
       }
@@ -1021,6 +1200,7 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
         setDefaultLlmConnection(connectionSlug)
       }
       await sessionManager.reinitializeAuth(connectionSlug)
+      invalidateAgentCatalogStatusCache()
 
       return {
         success: true,

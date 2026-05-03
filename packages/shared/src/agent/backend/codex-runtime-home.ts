@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { copyFile, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 
 import { CONFIG_DIR } from '../../config/paths.ts';
 import {
@@ -77,6 +77,47 @@ function topLevelKey(line: string): string | null {
   if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('[')) return null;
   const match = trimmed.match(/^([A-Za-z0-9_.-]+)\s*=/);
   return match?.[1] || null;
+}
+
+function tomlStringValueForKey(rootConfig: string, key: string): string | null {
+  for (const line of rootConfig.split(/\r?\n/)) {
+    if (parseTomlTable(line)) return null;
+    const match = line.trim().match(new RegExp(`^${key}\\s*=\\s*(['"])(.*?)\\1`));
+    if (match) return match[2] || null;
+  }
+  return null;
+}
+
+function expandHomePath(path: string): string {
+  if (path === '~') return homedir();
+  if (path.startsWith('~/')) return join(homedir(), path.slice(2));
+  return path;
+}
+
+async function resolveCatalogModelProvider(rootConfig: string, rootHome: string, model: string | undefined): Promise<string | null> {
+  if (!model) return null;
+  const catalogPath = tomlStringValueForKey(rootConfig, 'model_catalog_json');
+  if (!catalogPath) return null;
+
+  const expandedPath = expandHomePath(catalogPath);
+  const resolvedPath = isAbsolute(expandedPath) ? expandedPath : resolve(rootHome, expandedPath);
+  if (!existsSync(resolvedPath)) return null;
+
+  try {
+    const catalog = JSON.parse(await readFile(resolvedPath, 'utf8')) as {
+      models?: Array<{ slug?: unknown; id?: unknown; model_provider?: unknown }>;
+    };
+    const entry = catalog.models?.find(item => item.slug === model || item.id === model);
+    return typeof entry?.model_provider === 'string' && entry.model_provider.trim()
+      ? entry.model_provider.trim()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function tomlString(value: string): string {
+  return JSON.stringify(value);
 }
 
 function tableIsShadowedMcp(table: string, shadowedNames: Set<string>): boolean {
@@ -174,6 +215,7 @@ export async function prepareCodexRuntimeHome(args: PrepareCodexRuntimeHomeArgs)
   const shadowedNames = shadowedMcpServerNames(args.craftInventory).map(name => name.trim()).filter(Boolean);
   const rootConfigPath = join(rootHome, 'config.toml');
   const rootConfig = existsSync(rootConfigPath) ? await readFile(rootConfigPath, 'utf8') : '';
+  const catalogModelProvider = await resolveCatalogModelProvider(rootConfig, rootHome, args.model);
   const filteredRootConfig = rootConfig && policy.syncFromRoot
     ? filterRootConfig(rootConfig, shadowedNames)
     : null;
@@ -203,6 +245,7 @@ export async function prepareCodexRuntimeHome(args: PrepareCodexRuntimeHomeArgs)
     'approval_policy = "on-request"',
     'sandbox_mode = "workspace-write"',
     'developer_instructions = ""',
+    ...(catalogModelProvider ? [`model_provider = ${tomlString(catalogModelProvider)}`] : []),
     '',
     '[features]',
     `apps = ${policy.allowNativeApps ? 'true' : 'false'}`,
@@ -246,6 +289,7 @@ export async function prepareCodexRuntimeHome(args: PrepareCodexRuntimeHomeArgs)
       approval_policy: 'on-request',
       sandbox_mode: 'workspace-write',
       developer_instructions: '',
+      ...(catalogModelProvider ? { model_provider: catalogModelProvider } : {}),
       features: {
         apps: policy.allowNativeApps,
         plugins: policy.allowNativePlugins,

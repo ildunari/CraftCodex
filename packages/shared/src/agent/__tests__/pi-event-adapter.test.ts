@@ -372,6 +372,30 @@ describe('PiEventAdapter', () => {
       expect(events).toHaveLength(1);
       expect(events[0].isIntermediate).toBe(false);
     });
+
+    it('should not reopen final output after a final answer and later tool event', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+
+      const finalEvents = collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: { role: 'assistant', stopReason: 'stop', content: 'Final answer' },
+      } as any));
+
+      collect(adapter.adaptEvent({
+        type: 'tool_execution_end',
+        toolCallId: 'late-tool',
+        result: 'late output',
+        isError: false,
+      } as any));
+
+      const duplicateEvents = collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: { role: 'assistant', stopReason: 'stop', content: 'Final answer' },
+      } as any));
+
+      expect(finalEvents).toHaveLength(1);
+      expect(duplicateEvents).toHaveLength(0);
+    });
   });
 
   // ============================================================

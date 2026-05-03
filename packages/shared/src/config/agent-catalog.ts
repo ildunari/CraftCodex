@@ -26,6 +26,7 @@ export interface AgentCatalogEntry {
   setupUrl?: string;
   providerType: LlmConnection['providerType'];
   authType: LlmConnection['authType'];
+  piAuthProvider?: LlmConnection['piAuthProvider'];
   defaultSlug: string;
   defaultCommand?: string;
   preferredCommandCandidates?: string[];
@@ -63,15 +64,17 @@ export const AGENT_CATALOG: AgentCatalogEntry[] = [
   {
     id: 'pi',
     name: 'Craft Agents Backend',
-    description: 'Craft-hosted multi-provider agent runtime',
+    description: 'Craft-hosted multi-provider agent runtime using the default Craft auth method',
     iconKey: 'pi_agent',
     installLabel: 'Add connection',
     setupLabel: 'Configure backend',
     providerType: 'pi',
-    authType: 'api_key',
-    defaultSlug: 'pi-api-key',
+    authType: 'oauth',
+    piAuthProvider: 'openai-codex',
+    defaultSlug: 'craft-agents-backend',
     requiredCommands: [],
-    showInAgentManager: false,
+    showInAgentManager: true,
+    defaultModel: 'pi/gpt-5.2',
   },
   {
     id: 'codex',
@@ -151,6 +154,7 @@ export function createConnectionForAgent(entry: AgentCatalogEntry): LlmConnectio
     agentId: entry.id,
     providerType: entry.providerType,
     authType: entry.authType,
+    piAuthProvider: entry.providerType === 'pi' ? entry.piAuthProvider : undefined,
     createdAt: now,
     models: entry.models,
     defaultModel: entry.defaultModel,

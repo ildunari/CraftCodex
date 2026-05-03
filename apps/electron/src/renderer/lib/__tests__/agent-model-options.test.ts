@@ -61,6 +61,26 @@ describe('agent-model-options', () => {
     ])
   })
 
+  it('keeps existing Pi OpenAI-Codex models under Craft Agents Backend', () => {
+    const conn = connection({
+      slug: 'chatgpt-plus-2',
+      name: 'ChatGPT Pro',
+      providerType: 'pi',
+      authType: 'oauth',
+      piAuthProvider: 'openai-codex',
+      models: [
+        { id: 'pi/gpt-5.2', name: 'GPT-5.2', shortName: 'GPT-5.2', description: 'openai-codex model via Craft Agents Backend', provider: 'pi', contextWindow: 272000 },
+        { id: 'pi/gpt-5.3-codex', name: 'GPT-5.3 Codex', shortName: 'GPT-5.3 Codex', description: 'openai-codex model via Craft Agents Backend', provider: 'pi', contextWindow: 272000 },
+      ],
+    })
+
+    expect(getAgentDisplayInfo(conn).group).toBe('Craft Agents Backend')
+    expect(getSettingsModelOptions(conn).map(option => option.value)).toEqual([
+      'pi/gpt-5.2',
+      'pi/gpt-5.3-codex',
+    ])
+  })
+
   it('describes non-Claude agents for settings rows', () => {
     expect(getAgentDisplayInfo(connection({ providerType: 'codex', agentId: 'codex' })).description).toBe('Local Codex app server')
     expect(getAgentDisplayInfo(connection({ providerType: 'codex' })).group).toBe('Codex')
