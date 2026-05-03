@@ -1049,27 +1049,36 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
     }
   })
 
-  server.handle(RPC_CHANNELS.llmConnections.LIST_HERMES_PROFILES, async (_ctx, options?: { force?: boolean }): Promise<import('@craft-agent/shared/agent/backend/internal/drivers/hermes-profiles').HermesProfileInfo[]> => {
+  server.handle(RPC_CHANNELS.llmConnections.LIST_HERMES_PROFILES, async (_ctx, options?: { force?: boolean }): Promise<import('@craft-agent/shared/agent/backend/internal/drivers/hermes-profiles-types').HermesProfileInfo[]> => {
     const { listHermesProfiles, modelStringForProfile } = await import('@craft-agent/shared/agent/backend/internal/drivers/hermes-profiles')
-    const profiles = await listHermesProfiles({ force: options?.force })
-    // Best-effort: keep the Hermes connection's `models` mirror in sync with
-    // discovered profiles so the model picker shows them without a refetch.
-    if (profiles.length > 0) {
-      const hermes = getLlmConnections().find(c => c.agentId === 'hermes')
-      if (hermes) {
+    // GUI-launched Electron apps don't inherit the user's interactive PATH,
+    // so spawning bare `hermes` typically ENOENTs. Resolve the absolute path
+    // from the catalog's `preferredCommandCandidates` and reuse it for both
+    // discovery and the saved connection.
+    const entry = getAgentCatalogEntry('hermes')
+    const resolved = entry ? await resolvePreferredAgentCommand(entry) : 'hermes'
+    const command = resolved || 'hermes'
+    const profiles = await listHermesProfiles({ force: options?.force, command })
+    const hermes = getLlmConnections().find(c => c.agentId === 'hermes')
+    if (hermes) {
+      const updates: Partial<LlmConnection> = {}
+      // Backfill the resolved absolute path onto an existing connection so
+      // AcpAgent.spawn can find the binary too. Pre-existing connections
+      // saved before this fix will still have `acpCommand: "hermes"`.
+      if (resolved && hermes.acpCommand !== resolved) updates.acpCommand = resolved
+      if (profiles.length > 0) {
         const expected = profiles.map(p => modelStringForProfile(p.name))
         const current = hermes.models ?? []
         const same = expected.length === current.length && expected.every((m, i) => m === current[i])
         if (!same) {
+          updates.models = expected
           const defaultProfile = profiles.find(p => p.isDefault) ?? profiles[0]
-          updateLlmConnection(hermes.slug, {
-            models: expected,
-            defaultModel: hermes.defaultModel && expected.includes(hermes.defaultModel)
-              ? hermes.defaultModel
-              : modelStringForProfile(defaultProfile.name),
-          })
+          updates.defaultModel = hermes.defaultModel && expected.includes(hermes.defaultModel)
+            ? hermes.defaultModel
+            : modelStringForProfile(defaultProfile.name)
         }
       }
+      if (Object.keys(updates).length > 0) updateLlmConnection(hermes.slug, updates)
     }
     return profiles
   })

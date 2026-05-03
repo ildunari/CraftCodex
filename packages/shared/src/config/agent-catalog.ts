@@ -131,6 +131,7 @@ export const AGENT_CATALOG: AgentCatalogEntry[] = [
     authType: 'none',
     defaultSlug: 'hermes',
     defaultCommand: 'hermes',
+    preferredCommandCandidates: ['/Users/Kosta/.local/bin/hermes', '/opt/homebrew/bin/hermes', '/usr/local/bin/hermes', 'hermes'],
     defaultArgs: ['acp', '--accept-hooks'],
     requiredCommands: ['hermes'],
     commandProbes: [{ command: 'hermes', args: ['acp', '--help'], label: 'Hermes ACP mode' }],

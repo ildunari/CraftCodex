@@ -116,7 +116,13 @@ export async function listHermesProfiles(options: { command?: string; force?: bo
   }
   const command = options.command ?? 'hermes';
   const result = await runCommand(command, ['profile', 'list']);
-  if (result.exitCode !== 0) return [];
+  if (result.exitCode !== 0) {
+    if (process.env.CRAFT_DEBUG_HERMES) {
+      // eslint-disable-next-line no-console
+      console.warn(`[hermes-profiles] '${command} profile list' failed (code=${result.exitCode}): ${result.stderr.trim()}`);
+    }
+    return [];
+  }
   const profiles = parseHermesProfileList(result.stdout);
   cachedProfiles = { value: profiles, expiresAt: Date.now() + PROFILE_CACHE_TTL_MS };
   return profiles;
