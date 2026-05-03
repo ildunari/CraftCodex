@@ -143,7 +143,7 @@ export const acpDriver: ProviderDriver = {
       await Promise.race([
         agent.runMiniCompletion('Say ok'),
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('ACP health check timed out')), 10_000)
+          setTimeout(() => reject(new Error('ACP health check timed out')), 60_000)
         ),
       ]);
       return { success: true };

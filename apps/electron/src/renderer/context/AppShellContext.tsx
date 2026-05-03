@@ -45,6 +45,14 @@ export interface AppShellContextType {
   workspaceDefaultLlmConnection?: string
   /** Refresh LLM connections from config */
   refreshLlmConnections: () => Promise<void>
+  /** Cached local agent catalog (loaded once at startup, reused across pages) */
+  agentCatalog: import('../../shared/types').AgentCatalogStatus[]
+  /** Whether the agent catalog is currently loading (initial load or manual refresh) */
+  agentCatalogLoading: boolean
+  /** Last error encountered while loading the agent catalog (null when healthy) */
+  agentCatalogError: string | null
+  /** Force-refresh the agent catalog (re-runs probes; bypasses disk cache) */
+  refreshAgentCatalog: () => Promise<void>
   pendingPermissions: Map<string, PermissionRequest[]>
   pendingCredentials: Map<string, CredentialRequest[]>
   /** Get draft input text for a session - reads from ref without triggering re-renders */

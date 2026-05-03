@@ -56,8 +56,6 @@ import { getModelShortName, type ModelDefinition } from '@config/models'
 import { type CustomEndpointApi } from '@config/llm-connections'
 import { toast } from 'sonner'
 
-const AGENT_CATALOG_LOAD_TIMEOUT_MS = 12_000
-
 const THINKING_LEVEL_COPY: Record<ThinkingLevel, { name: string; description: string }> = {
   off: { name: 'Off', description: 'No extended reasoning' },
   low: { name: 'Low', description: 'Light reasoning, faster responses' },
@@ -69,24 +67,6 @@ const THINKING_LEVEL_COPY: Record<ThinkingLevel, { name: string; description: st
 
 function getThinkingLevelLabel(level: ThinkingLevel): string {
   return THINKING_LEVEL_COPY[level]?.name ?? level
-}
-
-function withAgentCatalogTimeout<T>(promise: Promise<T>): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timer = window.setTimeout(() => {
-      reject(new Error('Agent check timed out. The local agent service did not answer in time.'))
-    }, AGENT_CATALOG_LOAD_TIMEOUT_MS)
-
-    promise
-      .then(value => {
-        window.clearTimeout(timer)
-        resolve(value)
-      })
-      .catch(error => {
-        window.clearTimeout(timer)
-        reject(error)
-      })
-  })
 }
 
 export const meta: DetailsPageMeta = {
@@ -617,7 +597,15 @@ function AgentCatalogRow({ agent, onEnable, onSetup, onApiKeySetup, onRecheck, b
 // ============================================
 
 export default function AiSettingsPage() {
-  const { llmConnections, refreshLlmConnections, activeWorkspaceId } = useAppShellContext()
+  const {
+    llmConnections,
+    refreshLlmConnections,
+    activeWorkspaceId,
+    agentCatalog,
+    agentCatalogLoading,
+    agentCatalogError,
+    refreshAgentCatalog,
+  } = useAppShellContext()
 
   // API Setup overlay state
   const [showApiSetup, setShowApiSetup] = useState(false)
@@ -635,9 +623,6 @@ export default function AiSettingsPage() {
 
   // Workspaces for override cards
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
-  const [agentCatalog, setAgentCatalog] = useState<AgentCatalogStatus[]>([])
-  const [agentCatalogLoading, setAgentCatalogLoading] = useState(true)
-  const [agentCatalogError, setAgentCatalogError] = useState<string | null>(null)
   const [agentActionBusy, setAgentActionBusy] = useState<Record<string, boolean>>({})
   const [droidApiKeyOpen, setDroidApiKeyOpen] = useState(false)
   const [droidApiKey, setDroidApiKey] = useState('')
@@ -662,39 +647,15 @@ export default function AiSettingsPage() {
   const [renamingConnection, setRenamingConnection] = useState<{ slug: string; name: string } | null>(null)
   const [renameValue, setRenameValue] = useState('')
 
-  const loadAgentCatalog = useCallback(async (options: { forceRefresh?: boolean; refreshAfterCache?: boolean } = {}) => {
-    if (!window.electronAPI?.listAgentCatalog) {
-      setAgentCatalogLoading(false)
-      setAgentCatalogError('This CraftCodex build does not expose local agent management. Restart the latest app build and try again.')
-      return
-    }
-    setAgentCatalogLoading(true)
-    setAgentCatalogError(null)
-    try {
-      const catalog = await withAgentCatalogTimeout(window.electronAPI.listAgentCatalog({ forceRefresh: options.forceRefresh }))
-      setAgentCatalog(catalog)
-      if (options.refreshAfterCache && !options.forceRefresh) {
-        void window.electronAPI.listAgentCatalog({ forceRefresh: true })
-          .then(setAgentCatalog)
-          .catch(error => console.warn('Background agent catalog refresh failed:', error))
-      }
-    } catch (error) {
-      console.error('Failed to load agent catalog:', error)
-      setAgentCatalog([])
-      setAgentCatalogError(error instanceof Error ? error.message : 'Failed to load local agents.')
-    } finally {
-      setAgentCatalogLoading(false)
-    }
-  }, [])
-
-  // Load workspaces, default settings, agent catalog, and credential health
+  // Load workspaces, default settings, and credential health. The agent
+  // catalog itself is hydrated once at app startup (see App.tsx) and shared
+  // through AppShellContext, so this page no longer reloads it on mount.
   useEffect(() => {
     const load = async () => {
       if (!window.electronAPI) return
       try {
         const ws = await window.electronAPI.getWorkspaces()
         setWorkspaces(ws)
-        await loadAgentCatalog({ refreshAfterCache: true })
 
         const defaultThinkingLevel = await window.electronAPI.getDefaultThinkingLevel()
         setDefaultThinking(defaultThinkingLevel)
@@ -715,7 +676,7 @@ export default function AiSettingsPage() {
       }
     }
     load()
-  }, [activeWorkspaceId, loadAgentCatalog])
+  }, [activeWorkspaceId])
 
   // Helpers to open/close the fullscreen API setup overlay
   const openApiSetup = useCallback((connectionSlug?: string) => {
@@ -999,7 +960,7 @@ export default function AiSettingsPage() {
       if (result.success) {
         if (result.message) toast.success(result.message)
         await refreshLlmConnections?.()
-        await loadAgentCatalog({ forceRefresh: true })
+        await refreshAgentCatalog()
       } else {
         toast.error(result.error || 'Agent action failed')
       }
@@ -1008,7 +969,7 @@ export default function AiSettingsPage() {
     } finally {
       setAgentActionBusy(prev => ({ ...prev, [agentId]: false }))
     }
-  }, [loadAgentCatalog, refreshLlmConnections])
+  }, [refreshAgentCatalog, refreshLlmConnections])
 
   const handleEnableAgent = useCallback((agentId: string) => {
     if (!window.electronAPI?.enableAgent) return
@@ -1045,7 +1006,7 @@ export default function AiSettingsPage() {
       setDroidApiKey('')
       setDroidApiKeyOpen(false)
       await refreshLlmConnections?.()
-      await loadAgentCatalog({ forceRefresh: true })
+      await refreshAgentCatalog()
       if (result.connectionSlug && window.electronAPI?.testLlmConnection) {
         const testResult = await window.electronAPI.testLlmConnection(result.connectionSlug)
         if (!testResult.success) {
@@ -1058,7 +1019,7 @@ export default function AiSettingsPage() {
       setDroidApiKeySaving(false)
       setAgentActionBusy(prev => ({ ...prev, droid: false }))
     }
-  }, [droidApiKey, loadAgentCatalog, refreshLlmConnections])
+  }, [droidApiKey, refreshAgentCatalog, refreshLlmConnections])
 
   const handleRecheckAgent = useCallback((agent: AgentCatalogStatus) => {
     void runAgentAction(agent.id, async () => {
@@ -1066,10 +1027,10 @@ export default function AiSettingsPage() {
         const result = await window.electronAPI.testLlmConnection(agent.connectionSlug)
         if (!result.success) return { success: false, error: result.error }
       }
-      await loadAgentCatalog({ forceRefresh: true })
+      await refreshAgentCatalog()
       return { success: true }
     })
-  }, [loadAgentCatalog, runAgentAction])
+  }, [refreshAgentCatalog, runAgentAction])
 
   return (
     <div className="h-full flex flex-col">
@@ -1084,7 +1045,23 @@ export default function AiSettingsPage() {
             />
 
             <div className="space-y-8">
-              <SettingsSection title="Agents" description="Install or sign in to local agents. Once ready, they appear in the chat picker.">
+              <SettingsSection
+                title="Agents"
+                description="Install or sign in to local agents. Once ready, they appear in the chat picker."
+                action={(
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 gap-1.5"
+                    onClick={() => void refreshAgentCatalog()}
+                    disabled={agentCatalogLoading}
+                    title="Re-run readiness checks"
+                  >
+                    {agentCatalogLoading ? <Spinner className="size-3.5" /> : <RefreshCcw className="size-3.5" />}
+                    Refresh
+                  </Button>
+                )}
+              >
                 <SettingsCard>
                   {agentCatalog.map((agent) => (
                     <AgentCatalogRow
@@ -1112,7 +1089,7 @@ export default function AiSettingsPage() {
                         <p className="font-medium text-foreground">Could not load local agents</p>
                         <p className="mt-1">{agentCatalogError}</p>
                       </div>
-                      <Button variant="outline" size="sm" onClick={() => void loadAgentCatalog({ forceRefresh: true })}>
+                      <Button variant="outline" size="sm" onClick={() => void refreshAgentCatalog()}>
                         <RefreshCcw className="mr-1.5 h-3.5 w-3.5" />
                         Retry
                       </Button>

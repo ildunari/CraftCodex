@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { useTheme } from '@/hooks/useTheme'
 import type { ThemeOverrides } from '@config/theme'
 import { useSetAtom, useStore, useAtomValue, useAtom } from 'jotai'
-import type { Session, Workspace, SessionEvent, Message, FileAttachment, StoredAttachment, PermissionRequest, CredentialRequest, CredentialResponse, SetupNeeds, SessionStatus, NewChatActionParams, ContentBadge, LlmConnectionWithStatus, PermissionModeState } from '../shared/types'
+import type { Session, Workspace, SessionEvent, Message, FileAttachment, StoredAttachment, PermissionRequest, CredentialRequest, CredentialResponse, SetupNeeds, SessionStatus, NewChatActionParams, ContentBadge, LlmConnectionWithStatus, PermissionModeState, AgentCatalogStatus } from '../shared/types'
 import type { SessionDraft, DraftAttachmentRef } from '@craft-agent/shared/config'
 import type { SessionOptions, SessionOptionUpdates } from './hooks/useSessionOptions'
 import { defaultSessionOptions, mergeSessionOptions } from './hooks/useSessionOptions'
@@ -294,6 +294,10 @@ export default function App() {
   const [workspaceDefaultLlmConnection, setWorkspaceDefaultLlmConnection] = useState<string | undefined>()
   // Global default LLM connection slug (from app config)
   const [defaultLlmConnectionSlug, setDefaultLlmConnectionSlug] = useState<string | undefined>()
+  // Local agent catalog — loaded once at startup, reused by Settings & elsewhere
+  const [agentCatalog, setAgentCatalog] = useState<AgentCatalogStatus[]>([])
+  const [agentCatalogLoading, setAgentCatalogLoading] = useState(true)
+  const [agentCatalogError, setAgentCatalogError] = useState<string | null>(null)
 
   // Derive connection default model override from the default LLM connection
   const defaultConnection = useMemo(() => {
@@ -605,6 +609,54 @@ export default function App() {
       setWorkspaceDefaultLlmConnection(settings?.defaultLlmConnection)
     }
   }, [resolveDefaultConnectionSlug, windowWorkspaceId])
+
+  // Load the local agent catalog. Hits the disk-backed status cache when
+  // available (instant) and kicks a background refresh; `forceRefresh` skips
+  // the cache and re-runs probes (used by the manual refresh button).
+  const refreshAgentCatalogRef = useRef<{ inflight: Promise<void> | null }>({ inflight: null })
+  const loadAgentCatalog = useCallback(async (forceRefresh: boolean) => {
+    if (!window.electronAPI?.listAgentCatalog) {
+      setAgentCatalogLoading(false)
+      setAgentCatalogError('This build does not expose local agent management.')
+      return
+    }
+    // Coalesce concurrent calls — multiple callers (mount + listener) shouldn't
+    // double-probe.
+    if (refreshAgentCatalogRef.current.inflight) {
+      return refreshAgentCatalogRef.current.inflight
+    }
+    setAgentCatalogLoading(true)
+    setAgentCatalogError(null)
+    const work = (async () => {
+      try {
+        const catalog = await window.electronAPI.listAgentCatalog({ forceRefresh })
+        setAgentCatalog(catalog)
+        // When we hit the cache, kick a background refresh so the next mount
+        // sees up-to-date data without paying the wait now.
+        if (!forceRefresh) {
+          void window.electronAPI.listAgentCatalog({ forceRefresh: true })
+            .then(setAgentCatalog)
+            .catch(() => { /* background refresh — surface failures only on next foreground call */ })
+        }
+      } catch (error) {
+        setAgentCatalogError(error instanceof Error ? error.message : 'Failed to load local agents.')
+      } finally {
+        setAgentCatalogLoading(false)
+      }
+    })()
+    refreshAgentCatalogRef.current.inflight = work.finally(() => {
+      refreshAgentCatalogRef.current.inflight = null
+    })
+    return refreshAgentCatalogRef.current.inflight
+  }, [])
+
+  const refreshAgentCatalog = useCallback(() => loadAgentCatalog(true).then(() => undefined), [loadAgentCatalog])
+
+  // Load the agent catalog once at app startup. Settings page consumes from
+  // context and only re-fetches via the explicit refresh button.
+  useEffect(() => {
+    void loadAgentCatalog(false)
+  }, [loadAgentCatalog])
 
   // Handle onboarding completion
   const handleOnboardingComplete = useCallback(async () => {
@@ -1785,6 +1837,10 @@ export default function App() {
     llmConnections,
     workspaceDefaultLlmConnection,
     refreshLlmConnections,
+    agentCatalog,
+    agentCatalogLoading,
+    agentCatalogError,
+    refreshAgentCatalog,
     pendingPermissions,
     pendingCredentials,
     getDraft,
@@ -1831,6 +1887,10 @@ export default function App() {
     llmConnections,
     workspaceDefaultLlmConnection,
     refreshLlmConnections,
+    agentCatalog,
+    agentCatalogLoading,
+    agentCatalogError,
+    refreshAgentCatalog,
     pendingPermissions,
     pendingCredentials,
     getDraft,
