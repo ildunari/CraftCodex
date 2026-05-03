@@ -378,6 +378,7 @@ export const CHANNEL_MAP = {
   setDefaultLlmConnection: invoke(RPC_CHANNELS.llmConnections.SET_DEFAULT),
   setWorkspaceDefaultLlmConnection: invoke(RPC_CHANNELS.llmConnections.SET_WORKSPACE_DEFAULT),
   listAgentCatalog: invoke(RPC_CHANNELS.llmConnections.LIST_AGENT_CATALOG),
+  listHermesProfiles: invoke(RPC_CHANNELS.llmConnections.LIST_HERMES_PROFILES),
   enableAgent: invoke(RPC_CHANNELS.llmConnections.ENABLE_AGENT),
   openAgentSetup: invoke(RPC_CHANNELS.llmConnections.OPEN_AGENT_SETUP),
   saveAgentApiKey: invoke(RPC_CHANNELS.llmConnections.SAVE_AGENT_API_KEY),

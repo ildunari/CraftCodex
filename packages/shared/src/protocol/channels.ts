@@ -185,6 +185,7 @@ export const RPC_CHANNELS = {
     SET_WORKSPACE_DEFAULT: 'LLM_Connection:setWorkspaceDefault',
     REFRESH_MODELS: 'LLM_Connection:refreshModels',
     LIST_AGENT_CATALOG: 'LLM_Connection:listAgentCatalog',
+    LIST_HERMES_PROFILES: 'LLM_Connection:listHermesProfiles',
     ENABLE_AGENT: 'LLM_Connection:enableAgent',
     OPEN_AGENT_SETUP: 'LLM_Connection:openAgentSetup',
     SAVE_AGENT_API_KEY: 'LLM_Connection:saveAgentApiKey',

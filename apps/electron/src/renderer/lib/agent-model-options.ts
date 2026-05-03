@@ -3,6 +3,20 @@ import {
   type LlmConnection,
 } from '@config/llm-connections'
 import { getModelShortName, type ModelDefinition } from '@config/models'
+import { HERMES_PROFILE_MODEL_PREFIX, profileNameFromModelString } from '@craft-agent/shared/agent/backend/internal/drivers/hermes-profiles-types'
+
+/**
+ * Mapping from Hermes profile name → underlying model. Hydrated by callers that
+ * know the live profile list (Settings page, model selector); empty otherwise.
+ * The display helpers below are tolerant of an empty map and just fall back
+ * to "Hermes profile" as the description.
+ */
+const hermesProfileModelMap = new Map<string, string>()
+
+export function setHermesProfileModelMap(profiles: { name: string; model: string }[]): void {
+  hermesProfileModelMap.clear()
+  for (const p of profiles) hermesProfileModelMap.set(p.name, p.model)
+}
 
 export type AgentModelEntry = ModelDefinition | string
 
@@ -66,12 +80,27 @@ export function getModelId(model: AgentModelEntry): string {
 }
 
 export function getModelName(model: AgentModelEntry): string {
-  return typeof model === 'string' ? getModelShortName(model) : model.name
+  if (typeof model === 'string') {
+    const profile = profileNameFromModelString(model)
+    if (profile) return profile
+    return getModelShortName(model)
+  }
+  return model.name
 }
 
 export function getModelDescription(model: AgentModelEntry): string {
-  return typeof model === 'string' ? '' : model.description
+  if (typeof model === 'string') {
+    const profile = profileNameFromModelString(model)
+    if (profile) {
+      const m = hermesProfileModelMap.get(profile)
+      return m ? `Hermes profile · ${m}` : 'Hermes profile'
+    }
+    return ''
+  }
+  return model.description
 }
+
+export { HERMES_PROFILE_MODEL_PREFIX }
 
 export function getSettingsModelOptions(
   connection: LlmConnection | undefined,

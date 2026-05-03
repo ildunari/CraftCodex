@@ -5,6 +5,7 @@ import type { ProviderDriver } from '../driver-types.ts';
 import type { LlmConnection } from '../../../../config/storage.ts';
 import { getAgentCatalogEntry } from '../../../../config/agent-catalog.ts';
 import { DROID_FACTORY_API_KEY_ENV, isDroidAgentConnection } from '../../../../config/agent-auth.ts';
+import { profileNameFromModelString } from './hermes-profiles.ts';
 
 function acpArgsForConnection(connection: Pick<LlmConnection, 'agentId' | 'acpArgs'> | null | undefined): string[] {
   if (connection?.acpArgs?.length) return connection.acpArgs;
@@ -90,10 +91,13 @@ export const acpDriver: ProviderDriver = {
 
   buildRuntime({ context }) {
     const connection = context.connection;
+    const acpProfile = profileNameFromModelString(context.resolvedModel) ?? undefined;
     return {
       acpCommand: acpCommandForConnection(connection),
       acpArgs: acpArgsForConnection(connection),
       acpName: connection?.name || 'ACP Agent',
+      acpAgentId: connection?.agentId,
+      acpProfile,
       nativeCapabilityPolicy: connection?.nativeCapabilityPolicy,
     };
   },

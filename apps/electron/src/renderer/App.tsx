@@ -658,6 +658,28 @@ export default function App() {
     void loadAgentCatalog(false)
   }, [loadAgentCatalog])
 
+  // Hydrate the Hermes profile→model lookup so the picker can label entries
+  // with their underlying model (e.g. "coding · gpt-5.4"). Best-effort: any
+  // failure (hermes not installed, gateway unreachable) just leaves the map
+  // empty and the picker shows "Hermes profile" descriptions.
+  useEffect(() => {
+    if (!window.electronAPI?.listHermesProfiles) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const { setHermesProfileModelMap } = await import('@/lib/agent-model-options')
+        const profiles = await window.electronAPI.listHermesProfiles()
+        if (!cancelled) setHermesProfileModelMap(profiles)
+        // Hermes connection's `models` array gets refreshed server-side as
+        // part of LIST_HERMES_PROFILES, so re-pull connections to reflect.
+        if (!cancelled && profiles.length > 0) await refreshLlmConnections()
+      } catch {
+        // ignore — hermes may not be installed
+      }
+    })()
+    return () => { cancelled = true }
+  }, [refreshLlmConnections])
+
   // Handle onboarding completion
   const handleOnboardingComplete = useCallback(async () => {
     try {

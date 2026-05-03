@@ -471,6 +471,7 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.llmConnections.SET_WORKSPACE_DEFAULT,
   RPC_CHANNELS.llmConnections.REFRESH_MODELS,
   RPC_CHANNELS.llmConnections.LIST_AGENT_CATALOG,
+  RPC_CHANNELS.llmConnections.LIST_HERMES_PROFILES,
   RPC_CHANNELS.llmConnections.ENABLE_AGENT,
   RPC_CHANNELS.llmConnections.OPEN_AGENT_SETUP,
   RPC_CHANNELS.chatgpt.START_OAUTH,
@@ -1046,6 +1047,31 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
       deps.platform.logger?.error(`Failed to refresh models for ${slug}: ${msg}`)
       return { success: false, error: msg }
     }
+  })
+
+  server.handle(RPC_CHANNELS.llmConnections.LIST_HERMES_PROFILES, async (_ctx, options?: { force?: boolean }): Promise<import('@craft-agent/shared/agent/backend/internal/drivers/hermes-profiles').HermesProfileInfo[]> => {
+    const { listHermesProfiles, modelStringForProfile } = await import('@craft-agent/shared/agent/backend/internal/drivers/hermes-profiles')
+    const profiles = await listHermesProfiles({ force: options?.force })
+    // Best-effort: keep the Hermes connection's `models` mirror in sync with
+    // discovered profiles so the model picker shows them without a refetch.
+    if (profiles.length > 0) {
+      const hermes = getLlmConnections().find(c => c.agentId === 'hermes')
+      if (hermes) {
+        const expected = profiles.map(p => modelStringForProfile(p.name))
+        const current = hermes.models ?? []
+        const same = expected.length === current.length && expected.every((m, i) => m === current[i])
+        if (!same) {
+          const defaultProfile = profiles.find(p => p.isDefault) ?? profiles[0]
+          updateLlmConnection(hermes.slug, {
+            models: expected,
+            defaultModel: hermes.defaultModel && expected.includes(hermes.defaultModel)
+              ? hermes.defaultModel
+              : modelStringForProfile(defaultProfile.name),
+          })
+        }
+      }
+    }
+    return profiles
   })
 
   server.handle(RPC_CHANNELS.llmConnections.LIST_AGENT_CATALOG, async (_ctx, options?: ListAgentCatalogOptions): Promise<AgentCatalogStatus[]> => {

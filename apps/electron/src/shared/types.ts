@@ -645,6 +645,7 @@ export interface ElectronAPI {
   testLlmConnection(slug: string): Promise<{ success: boolean; error?: string }>
   setDefaultLlmConnection(slug: string): Promise<{ success: boolean; error?: string }>
   listAgentCatalog(options?: { forceRefresh?: boolean }): Promise<AgentCatalogStatus[]>
+  listHermesProfiles(options?: { force?: boolean }): Promise<import('@craft-agent/shared/agent/backend/internal/drivers/hermes-profiles-types').HermesProfileInfo[]>
   enableAgent(agentId: string): Promise<AgentCatalogActionResult>
   openAgentSetup(agentId: string): Promise<AgentCatalogActionResult>
   saveAgentApiKey(agentId: string, apiKey: string): Promise<AgentCatalogActionResult>

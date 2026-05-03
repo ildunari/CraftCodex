@@ -37,6 +37,10 @@ export interface BackendRuntimePayload extends Record<string, unknown> {
   acpArgs?: string[];
   /** Optional friendly name for logs/UI. */
   acpName?: string;
+  /** Curated agent id for ACP backends — drives spawn-time hooks (e.g. Hermes profile activation). */
+  acpAgentId?: string;
+  /** Selected profile slug for multi-profile ACP agents (Hermes). Persisted on the connection's `model`. */
+  acpProfile?: string;
   /** Command used by native Codex app-server backends. */
   codexCommand?: string;
   /** Arguments passed to codexCommand. */

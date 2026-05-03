@@ -18,6 +18,7 @@ const EXPECTED_CHANNELS: string[] = [
   "LLM_Connection:getApiKey",
   "LLM_Connection:list",
   "LLM_Connection:listAgentCatalog",
+  "LLM_Connection:listHermesProfiles",
   "LLM_Connection:listWithStatus",
   "LLM_Connection:openAgentSetup",
   "LLM_Connection:refreshModels",

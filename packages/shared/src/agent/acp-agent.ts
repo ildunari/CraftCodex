@@ -19,6 +19,7 @@ import type { BackendConfig, ChatOptions } from './backend/types.ts';
 import { AbortReason } from './backend/types.ts';
 import { EventQueue } from './backend/event-queue.ts';
 import { getBackendRuntime } from './backend/internal/driver-types.ts';
+import { useHermesProfile, startHermesGatewayIfStopped } from './backend/internal/drivers/hermes-profiles.ts';
 import { getSystemPrompt } from '../prompts/system.ts';
 import { getSessionPlansPath } from '../sessions/storage.ts';
 import { normalizeAgentCapabilities, type AgentCapabilities, type PermissionOption, type PromptCapabilities } from './acp/acp-types.ts';
@@ -514,6 +515,7 @@ export class AcpAgent extends BaseAgent {
       await new Promise((res) => setTimeout(res, delay));
     }
 
+    await this.activateAcpAgent();
     this.spawnSubprocess();
     this.initialized = withTimeout(
       this.sendRequest('initialize', {
@@ -544,6 +546,35 @@ export class AcpAgent extends BaseAgent {
       // and re-throws the cached rejection forever.
       this.killSubprocess();
       throw error;
+    }
+  }
+
+  /**
+   * Per-agent activation hook: runs after back-off but before `spawn`.
+   * Today this only does work for Hermes, where the user picks a *profile*
+   * (a model+gateway preset) and we have to (a) make that profile sticky
+   * for the about-to-be-spawned `hermes acp` subprocess, and (b) make sure
+   * the gateway is up. Other agents are no-ops.
+   */
+  private async activateAcpAgent(): Promise<void> {
+    const runtime = getBackendRuntime(this.config) as {
+      acpAgentId?: string;
+      acpProfile?: string;
+      acpCommand?: string;
+    };
+    if (runtime.acpAgentId !== 'hermes' || !runtime.acpProfile) return;
+    const command = runtime.acpCommand || 'hermes';
+    try {
+      const useResult = await useHermesProfile(runtime.acpProfile, { command });
+      if (!useResult.ok) {
+        this.debug(`[hermes] profile use failed: ${useResult.error}`);
+      }
+      const gateway = await startHermesGatewayIfStopped({ command });
+      if (!gateway.ok) {
+        this.debug(`[hermes] gateway start failed: ${gateway.error}`);
+      }
+    } catch (error) {
+      this.debug(`[hermes] activation error: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
