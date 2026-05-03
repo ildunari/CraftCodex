@@ -25,7 +25,7 @@ import type { StoredAttachment, MessageRole, ToolStatus, AuthRequestType, AuthSt
  */
 export const SESSION_PERSISTENT_FIELDS = [
   // Identity
-  'id', 'workspaceRootPath', 'sdkSessionId', 'sdkCwd',
+  'id', 'workspaceRootPath', 'sdkSessionId', 'sdkCwd', 'acpSessionId',
   // Timestamps
   'createdAt', 'lastUsedAt', 'lastMessageAt',
   // Display
@@ -100,6 +100,12 @@ export interface SessionConfig {
   id: string;
   /** SDK session ID (captured after first message) */
   sdkSessionId?: string;
+  /**
+   * ACP backend session ID — distinct from sdkSessionId because Claude
+   * resume logic checks the latter specifically. Persisted so we can issue
+   * `session/load` after a subprocess crash instead of starting fresh.
+   */
+  acpSessionId?: string;
   /** Workspace root path this session belongs to */
   workspaceRootPath: string;
   /** Optional user-defined name */
@@ -219,6 +225,8 @@ export interface SessionHeader {
   id: string;
   /** SDK session ID (captured after first message) */
   sdkSessionId?: string;
+  /** ACP backend session ID — used for session/load resume after a crash */
+  acpSessionId?: string;
   /** Workspace root path (stored as portable path, e.g., ~/.craft-agent/...) */
   workspaceRootPath: string;
   /** Optional user-defined name */
@@ -320,6 +328,8 @@ export interface SessionMetadata {
   /** Preview of first user message */
   preview?: string;
   sdkSessionId?: string;
+  /** ACP backend session ID — used for session/load resume after a crash */
+  acpSessionId?: string;
   /** Whether this session is flagged */
   isFlagged?: boolean;
   /** User-controlled session status */

@@ -303,6 +303,13 @@ export interface PermissionRequest extends BasePermissionRequest {
 
 export interface PermissionResponseOptions {
   rememberForMinutes?: number
+  /**
+   * ACP-spec PermissionOptionId — the agent-supplied option the user picked.
+   * Backends without an explicit option list ignore this; the ACP backend
+   * uses it to skip its allow/alwaysAllow → optionId inference when the UI
+   * has already rendered the agent's options directly.
+   */
+  optionId?: string
 }
 
 // Re-export for handler convenience

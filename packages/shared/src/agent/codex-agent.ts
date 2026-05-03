@@ -229,7 +229,7 @@ export class CodexAgent extends BaseAgent {
     return this._isProcessing;
   }
 
-  respondToPermission(requestId: string, allowed: boolean, _alwaysAllow?: boolean): void {
+  respondToPermission(requestId: string, allowed: boolean, _alwaysAllow?: boolean, _optionId?: string): void {
     const pending = this.pendingPermissions.get(requestId);
     if (!pending) return;
     this.pendingPermissions.delete(requestId);

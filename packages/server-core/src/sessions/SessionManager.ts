@@ -800,6 +800,8 @@ interface ManagedSession {
   poolServer?: McpPoolServer
   // SDK session ID for conversation continuity
   sdkSessionId?: string
+  // ACP backend session ID — persisted so we can issue session/load after a crash
+  acpSessionId?: string
   // Token usage for display
   tokenUsage?: {
     inputTokens: number
@@ -2905,6 +2907,7 @@ export class SessionManager implements ISessionManager {
         id: managed.id,
         workspaceRootPath: managed.workspace.rootPath,
         sdkSessionId: managed.sdkSessionId,
+        acpSessionId: managed.acpSessionId,
         branchFromSdkSessionId: managed.branchContextStrategy === 'sdk-fork' ? managed.branchFromSdkSessionId : undefined,
         branchFromSessionPath: managed.branchContextStrategy === 'sdk-fork' ? managed.branchFromSessionPath : undefined,
         branchFromSdkCwd: managed.branchContextStrategy === 'sdk-fork' ? managed.branchFromSdkCwd : undefined,
@@ -2938,6 +2941,20 @@ export class SessionManager implements ISessionManager {
       const onSdkSessionIdCleared = () => {
         managed.sdkSessionId = undefined
         sessionLog.info(`SDK session ID cleared for ${managed.id} (resume recovery)`)
+        this.persistSession(managed)
+        sessionPersistenceQueue.flush(managed.id)
+      }
+
+      const onAcpSessionIdUpdate = (acpSessionId: string) => {
+        managed.acpSessionId = acpSessionId
+        sessionLog.info(`ACP session ID captured for ${managed.id}: ${acpSessionId}`)
+        this.persistSession(managed)
+        sessionPersistenceQueue.flush(managed.id)
+      }
+
+      const onAcpSessionIdCleared = () => {
+        managed.acpSessionId = undefined
+        sessionLog.info(`ACP session ID cleared for ${managed.id}`)
         this.persistSession(managed)
         sessionPersistenceQueue.flush(managed.id)
       }
@@ -3015,6 +3032,8 @@ export class SessionManager implements ISessionManager {
         session: sessionConfig,
         onSdkSessionIdUpdate,
         onSdkSessionIdCleared,
+        onAcpSessionIdUpdate,
+        onAcpSessionIdCleared,
         getRecoveryMessages,
         getBranchFallbackMessages,
         getBranchSeedMessages,
@@ -6137,8 +6156,8 @@ export class SessionManager implements ISessionManager {
         }
       }
 
-      sessionLog.info(`Permission response for ${requestId}: allowed=${allowed}, alwaysAllow=${alwaysAllow}`)
-      managed.agent.respondToPermission(requestId, allowed, alwaysAllow)
+      sessionLog.info(`Permission response for ${requestId}: allowed=${allowed}, alwaysAllow=${alwaysAllow}${options?.optionId ? `, optionId=${options.optionId}` : ''}`)
+      managed.agent.respondToPermission(requestId, allowed, alwaysAllow, options?.optionId)
       return true
     } else {
       sessionLog.warn(`Cannot respond to permission - no agent for session ${sessionId}`)
