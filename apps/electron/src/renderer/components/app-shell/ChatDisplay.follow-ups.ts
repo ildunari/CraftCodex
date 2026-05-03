@@ -17,6 +17,7 @@
  */
 
 import { normalizeFollowUpText } from '@craft-agent/ui/annotations/follow-up-state'
+import { getFormatter } from '@craft-agent/ui/annotations/follow-up-formatter-registry'
 
 export type PendingFollowUpAnnotation = {
   messageId: string
@@ -26,6 +27,15 @@ export type PendingFollowUpAnnotation = {
   createdAt: number
   color?: string
   meta?: Record<string, unknown>
+  // Surface-aware fields (populated from annotation.meta.document when present)
+  sourceType?: 'markdown' | 'pdf' | 'docx' | 'html' | 'pptx'
+  sourceFile?: string
+  pageOrSlide?: number
+  sectionHeading?: string
+  surroundingText?: string
+  quotePrefix?: string
+  quoteSuffix?: string
+  attachmentId?: string
 }
 
 /**
@@ -39,11 +49,18 @@ export function truncateForChipTooltip(text: string, maxLength: number): string 
   return `${normalized.slice(0, maxLength - 1).trimEnd()}…`
 }
 
+function normalizeExcerptForMessage(text: string, maxLength = 280): string {
+  const normalized = normalizeFollowUpText(text)
+  if (normalized.length <= maxLength) return normalized
+  return `${normalized.slice(0, maxLength - 1).trimEnd()}…`
+}
+
 /**
  * Format pending follow-up annotations as a markdown section appended to
- * the user's message before it is sent to the agent. Quotes pass through
- * in full — only whitespace is normalized so the round-trip parser
- * (`normalizeFollowUpsMarkdown`) can re-parse them on message edit.
+ * the user's message before it is sent to the agent. Quote formatting is
+ * delegated to surface-specific formatters via `getFormatter` so PDF,
+ * DOCX, HTML, etc. surfaces can attach attribution metadata (page,
+ * heading, source file) appropriate to the document type.
  */
 export function formatFollowUpSection(
   followUps: PendingFollowUpAnnotation[],
@@ -54,11 +71,22 @@ export function formatFollowUpSection(
   const includeTopSeparator = options?.includeTopSeparator ?? true
 
   const items = followUps.map((followUp, idx) => {
-    const quoteText = normalizeFollowUpText(followUp.selectedText)
-    return [
-      `> [#${idx + 1}] ${quoteText}`,
-      `→ ${followUp.note}`,
-    ].join('\n')
+    const formatter = getFormatter(followUp.sourceType ?? 'markdown')
+    const context = {
+      fileName: followUp.sourceFile,
+      pageOrSlide: followUp.pageOrSlide,
+      sectionHeading: followUp.sectionHeading,
+      surroundingText: followUp.surroundingText ?? '',
+      documentType: followUp.sourceType ?? 'markdown',
+    }
+    const rawQuote = normalizeExcerptForMessage(followUp.selectedText)
+    const formattedQuote = formatter.formatQuote(rawQuote, context)
+    const attribution = formatter.formatAttribution(context)
+
+    const lines = [`> [#${idx + 1}] ${formattedQuote}`]
+    if (attribution) lines.push(`> ${attribution}`)
+    lines.push(`→ ${followUp.note}`)
+    return lines.join('\n')
   })
 
   const body = ['**Follow-ups**', items.join('\n\n---\n\n')].join('\n\n')

@@ -43,22 +43,17 @@ import {
   formatAnnotationFollowUpTooltipText,
   getAnnotationNoteText,
 } from '../annotations/follow-up-state'
+import { formatCopyAsQuote } from '../annotations/follow-up-formatter-registry'
 import {
-  ANNOTATION_PREFIX_SUFFIX_WINDOW,
   SELECTION_POINTER_MAX_AGE_MS,
   clamp,
   hasExistingTextRangeAnnotation,
   createSelectionPreviewAnnotation,
   createTextSelectionAnnotation,
-  collectTextSegments,
-  getCanonicalText,
-  resolveNodeOffset,
   type AnnotationOverlayRect,
 } from '../annotations/annotation-core'
-import {
-  annotationColorToCss,
-} from '../annotations/annotation-style-tokens'
 import { clearBlockAnnotationMarkers, applyBlockAnnotationMarker } from '../annotations/block-markers'
+import { clearAnnotationMarks } from '../annotations/highlight-dom-mutations'
 import { canAnnotateMessage, shouldRenderAnnotationIslandInPortal } from '../annotations/annotation-host-config'
 import { clearDomSelection } from '../annotations/selection-restore'
 import {
@@ -79,6 +74,7 @@ import { useAnnotationInteractionController } from '../annotations/use-annotatio
 import { useAnnotationIslandPresentation } from '../annotations/use-annotation-island-presentation'
 import { useAnnotationIslandEvents } from '../annotations/use-annotation-island-events'
 import { useAnnotationCancelRestore } from '../annotations/use-annotation-cancel-restore'
+import { MarkdownAnnotationSurface } from '../annotations/MarkdownAnnotationSurface'
 import { DocumentFormattedMarkdownOverlay } from '../overlay'
 import { AcceptPlanDropdown } from './AcceptPlanDropdown'
 import {
@@ -1471,158 +1467,6 @@ function BranchDropdown({ onBranch }: BranchDropdownProps) {
 
 const MAX_HEIGHT = 540
 
-function clearAnnotationMarks(root: HTMLElement): void {
-  const annotatedInlineCodeNodes = root.querySelectorAll<HTMLElement>('code[data-ca-annotation-inline-code="true"]')
-  annotatedInlineCodeNodes.forEach((codeNode) => {
-    codeNode.removeAttribute('data-ca-annotation-inline-code')
-    codeNode.style.backgroundColor = ''
-    codeNode.style.boxShadow = ''
-  })
-
-  const marks = root.querySelectorAll('span[data-ca-annotation-id]')
-  marks.forEach(mark => {
-    const parent = mark.parentNode
-    if (!parent) return
-
-    const badge = mark.querySelector('[data-ca-annotation-index]')
-    if (badge) badge.remove()
-
-    parent.replaceChild(document.createTextNode(mark.textContent || ''), mark)
-    parent.normalize()
-  })
-}
-
-function createAnnotationIndexBadge(index: number): HTMLSpanElement {
-  const chip = document.createElement('span')
-  chip.setAttribute('data-ca-annotation-index', String(index))
-  chip.textContent = String(index)
-  chip.style.position = 'absolute'
-  chip.style.top = '-7px'
-  chip.style.right = '-7px'
-  chip.style.minWidth = '16px'
-  chip.style.height = '15px'
-  chip.style.padding = '0 3px'
-  chip.style.borderRadius = '9999px'
-  chip.style.backgroundColor = 'var(--info)'
-  chip.style.color = 'rgba(15, 23, 42, 0.95)'
-  chip.style.fontSize = '10px'
-  chip.style.fontWeight = '600'
-  chip.style.lineHeight = '15px'
-  chip.style.textAlign = 'center'
-  chip.classList.add('shadow-tinted')
-  chip.style.setProperty('--shadow-color', 'var(--info-rgb)')
-  chip.style.pointerEvents = 'none'
-  chip.style.userSelect = 'none'
-  return chip
-}
-
-function applyTextHighlightRange(
-  root: HTMLElement,
-  range: { start: number; end: number },
-  annotation: AnnotationV1,
-  annotationIndex?: number,
-): void {
-  if (range.end <= range.start) return
-
-  // Avoid visually highlighting trailing/leading hard newlines.
-  // Those can produce extra apparent blank lines at line boundaries.
-  const fullText = getCanonicalText(root)
-  let displayStart = range.start
-  let displayEnd = range.end
-  while (displayStart < displayEnd && /[\n\r]/.test(fullText[displayStart] ?? '')) displayStart += 1
-  while (displayEnd > displayStart && /[\n\r]/.test(fullText[displayEnd - 1] ?? '')) displayEnd -= 1
-  if (displayEnd <= displayStart) return
-
-  const segments = collectTextSegments(root)
-  const createdMarks: HTMLSpanElement[] = []
-
-  for (const segment of segments) {
-    if (segment.end <= displayStart || segment.start >= displayEnd) continue
-
-    const localStart = Math.max(displayStart, segment.start) - segment.start
-    const localEnd = Math.min(displayEnd, segment.end) - segment.start
-    if (localEnd <= localStart) continue
-
-    const source = segment.node
-    const after = source.splitText(localEnd)
-    const selected = source.splitText(localStart)
-
-    const inlineCodeParent = selected.parentElement?.closest<HTMLElement>('code')
-    if (inlineCodeParent) {
-      inlineCodeParent.setAttribute('data-ca-annotation-inline-code', 'true')
-      inlineCodeParent.style.backgroundColor = annotationColorToCss(annotation.style?.color)
-      inlineCodeParent.style.boxShadow = 'none'
-    }
-
-    const mark = document.createElement('span')
-    mark.setAttribute('data-ca-annotation-id', annotation.id)
-    mark.style.backgroundColor = annotationColorToCss(annotation.style?.color)
-    mark.style.borderRadius = '0'
-    mark.style.padding = '0'
-    mark.style.margin = '0'
-    mark.style.position = 'relative'
-    selected.parentNode?.replaceChild(mark, selected)
-    mark.appendChild(selected)
-    createdMarks.push(mark)
-
-    // Keep reference alive for TS and clarity
-    void after
-  }
-
-  if (createdMarks.length > 0) {
-    type RowBucket = { top: number; marks: HTMLSpanElement[] }
-    const rows: RowBucket[] = []
-
-    for (const mark of createdMarks) {
-      const rect = mark.getBoundingClientRect()
-      const row = rows.find(candidate => Math.abs(candidate.top - rect.top) <= 2)
-      if (row) {
-        row.marks.push(mark)
-      } else {
-        rows.push({ top: rect.top, marks: [mark] })
-      }
-    }
-
-    for (const row of rows) {
-      const rowMarks = row.marks
-      const first = rowMarks[0]
-      const last = rowMarks[rowMarks.length - 1]
-      if (!first || !last) continue
-
-      first.style.borderTopLeftRadius = '6px'
-      first.style.borderBottomLeftRadius = '6px'
-      last.style.borderTopRightRadius = '6px'
-      last.style.borderBottomRightRadius = '6px'
-    }
-  }
-
-  if (annotationIndex != null && createdMarks.length > 0) {
-    // Prefer placing the index badge on non-code marks, then choose the top-right-most
-    // mark on the first visible row for stable placement.
-    const nonCodeMarks = createdMarks.filter(mark => !mark.closest('code'))
-    const badgePool = nonCodeMarks.length > 0 ? nonCodeMarks : createdMarks
-
-    const preferredInitial = badgePool[0]
-    if (!preferredInitial) return
-
-    let preferredMark = preferredInitial
-    let preferredRect = preferredMark.getBoundingClientRect()
-
-    for (const mark of badgePool.slice(1)) {
-      const rect = mark.getBoundingClientRect()
-      const isHigherRow = rect.top < preferredRect.top - 1
-      const sameRow = Math.abs(rect.top - preferredRect.top) <= 2
-      const isMoreRight = rect.right > preferredRect.right
-
-      if (isHigherRow || (sameRow && isMoreRight)) {
-        preferredMark = mark
-        preferredRect = rect
-      }
-    }
-
-    preferredMark.appendChild(createAnnotationIndexBadge(annotationIndex))
-  }
-}
 
 /**
  * ResponseCard - Unified card component for AI responses and plans
@@ -1705,9 +1549,24 @@ export function ResponseCard({
   const [annotationOverlay, setAnnotationOverlay] = useState<{ rects: AnnotationOverlayRect[]; chips: AnnotationOverlayChip[] }>({ rects: [], chips: [] })
   const contentRef = useRef<HTMLDivElement>(null)
   const contentLayerRef = useRef<HTMLDivElement>(null)
+  const surfaceRef = useRef<MarkdownAnnotationSurface | null>(null)
   const lastPointerRef = useRef<PointerSnapshot | null>(null)
   const dragStartPointerRef = useRef<PointerSnapshot | null>(null)
   const selectionStartedInContentRef = useRef(false)
+
+  /** Lazily create or retrieve the MarkdownAnnotationSurface for the content root. */
+  const getSurface = useCallback((): MarkdownAnnotationSurface | null => {
+    const root = contentLayerRef.current
+    if (!root) {
+      surfaceRef.current = null
+      return null
+    }
+    // Re-create if root element changed (unlikely but defensive)
+    if (!surfaceRef.current || surfaceRef.current.rootElement !== root) {
+      surfaceRef.current = new MarkdownAnnotationSurface(root)
+    }
+    return surfaceRef.current
+  }, [])
 
   const canAnnotate = canAnnotateMessage({
     hasAddAnnotationHandler: !!onAddAnnotation,
@@ -1715,6 +1574,21 @@ export function ResponseCard({
     isStreaming,
   })
   const allowAnnotationIsland = annotationInteractionMode === 'interactive'
+
+  // Bound annotation callbacks that close over messageId so child blocks
+  // (MarkdownHtmlBlock, MarkdownPdfBlock, MarkdownDocxBlock) don't need it.
+  const boundAddAnnotation = React.useMemo(
+    () => onAddAnnotation && messageId ? (annotation: AnnotationV1) => onAddAnnotation(messageId, annotation) : undefined,
+    [onAddAnnotation, messageId],
+  )
+  const boundRemoveAnnotation = React.useMemo(
+    () => onRemoveAnnotation && messageId ? (annotationId: string) => onRemoveAnnotation(messageId, annotationId) : undefined,
+    [onRemoveAnnotation, messageId],
+  )
+  const boundUpdateAnnotation = React.useMemo(
+    () => onUpdateAnnotation && messageId ? (annotationId: string, patch: Partial<AnnotationV1>) => onUpdateAnnotation(messageId, annotationId, patch) : undefined,
+    [onUpdateAnnotation, messageId],
+  )
 
   // Detect dark mode from document class and listen for changes
   useEffect(() => {
@@ -1805,6 +1679,7 @@ export function ResponseCard({
   }, [activeAnnotationDetail, activeAnnotation, closeSelectionMenu])
 
   useEffect(() => {
+    const surface = getSurface()
     const root = contentLayerRef.current
     if (!root) {
       setAnnotationOverlay({ rects: [], chips: [] })
@@ -1812,7 +1687,12 @@ export function ResponseCard({
     }
 
     const recomputeOverlay = () => {
-      clearAnnotationMarks(root)
+      // Delegate text highlight DOM mutations to the surface
+      if (surface) {
+        surface.setRenderedAnnotations(renderedAnnotations)
+      } else {
+        clearAnnotationMarks(root)
+      }
       clearBlockAnnotationMarkers(root)
 
       if (!renderedAnnotations.length) {
@@ -1842,11 +1722,19 @@ export function ResponseCard({
     }
 
     recomputeOverlay()
+
+    // Use surface geometry invalidation observer (resize + scroll + ResizeObserver)
+    // instead of just window resize
+    if (surface) {
+      return surface.observeGeometryInvalidation(recomputeOverlay)
+    }
+
+    // Fallback if surface unavailable
     window.addEventListener('resize', recomputeOverlay)
     return () => {
       window.removeEventListener('resize', recomputeOverlay)
     }
-  }, [annotations, renderedAnnotations, text, displayedText, isStreaming])
+  }, [annotations, renderedAnnotations, text, displayedText, isStreaming, getSurface])
 
   useEffect(() => {
     if (!canAnnotate) {
@@ -2016,6 +1904,38 @@ export function ResponseCard({
     text,
   ])
 
+  const handleHighlight = useCallback(() => {
+    if (!pendingSelection) return
+    // Create a highlight-only annotation (no note) and close the Island
+    void saveFollowUp('')
+    clearDomSelection()
+  }, [pendingSelection, saveFollowUp])
+
+  const handleCopyAsQuote = useCallback(async () => {
+    if (!pendingSelection) return
+
+    const surface = getSurface()
+    const context = surface
+      ? surface.getFollowUpContext({
+          selectedText: pendingSelection.selectedText,
+          prefix: pendingSelection.prefix,
+          suffix: pendingSelection.suffix,
+          scope: { kind: 'markdown', start: pendingSelection.start, end: pendingSelection.end },
+        })
+      : { surroundingText: pendingSelection.selectedText, documentType: 'markdown' as const }
+
+    const formatted = formatCopyAsQuote(pendingSelection.selectedText, context)
+
+    try {
+      await navigator.clipboard.writeText(formatted)
+    } catch {
+      // Clipboard API may be blocked — silently fail
+    }
+
+    clearDomSelection()
+    closeSelectionMenu()
+  }, [pendingSelection, getSurface, closeSelectionMenu])
+
   const handleSubmitFollowUp = useCallback((note: string) => {
     void saveFollowUp(note)
   }, [saveFollowUp])
@@ -2100,47 +2020,35 @@ export function ResponseCard({
   }, [])
 
   const showSelectionMenuFromCurrentSelection = useCallback(() => {
-    const root = contentLayerRef.current
-    if (!root) return
+    const surface = getSurface()
+    if (!surface) return
 
     requestAnimationFrame(() => {
-      const selection = window.getSelection()
-      if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+      // Delegate text selection capture to the surface
+      const captured = surface.captureSelection()
+      if (!captured || captured.scope.kind !== 'markdown') {
         closeSelectionMenu()
         return
       }
 
-      const range = selection.getRangeAt(0)
-      if (!root.contains(range.commonAncestorContainer)) {
-        closeSelectionMenu()
-        return
-      }
-
-      const start = resolveNodeOffset(root, range.startContainer, range.startOffset)
-      const end = resolveNodeOffset(root, range.endContainer, range.endOffset)
-      if (start == null || end == null || end <= start) {
-        closeSelectionMenu()
-        return
-      }
-
-      const selectedText = range.toString()
-      if (!selectedText || !/\S/.test(selectedText)) {
-        closeSelectionMenu()
-        return
-      }
+      const { start, end } = captured.scope
+      const { selectedText, prefix, suffix } = captured
 
       if (hasExistingTextRangeAnnotation(annotations, start, end)) {
         closeSelectionMenu()
         return
       }
 
-      const fullText = getCanonicalText(root)
-      const prefix = fullText.slice(Math.max(0, start - ANNOTATION_PREFIX_SUFFIX_WINDOW), start)
-      const suffix = fullText.slice(end, end + ANNOTATION_PREFIX_SUFFIX_WINDOW)
+      // Anchor rect computation remains in TurnCard — it's UI positioning
+      // logic that depends on pointer state, not annotation domain logic.
+      const selection = window.getSelection()
+      const range = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null
 
       // Prefer fragmented client rects over union bounds for wrapped selections.
       // The union rect often produces an x-axis anchor that feels detached.
-      const rects = Array.from(range.getClientRects()).filter(rect => rect.width > 0 && rect.height > 0)
+      const rects = range
+        ? Array.from(range.getClientRects()).filter(rect => rect.width > 0 && rect.height > 0)
+        : []
       const pointer = lastPointerRef.current
       const hasRecentPointer = Boolean(pointer && (Date.now() - pointer.ts) <= SELECTION_POINTER_MAX_AGE_MS)
       const pointerX = hasRecentPointer && pointer ? pointer.x : null
@@ -2176,8 +2084,11 @@ export function ResponseCard({
         } else {
           anchorRect = rects.reduce((best, rect) => (rect.top < best.top ? rect : best))
         }
-      } else {
+      } else if (range) {
         anchorRect = range.getBoundingClientRect()
+      } else {
+        closeSelectionMenu()
+        return
       }
 
       const anchorRowRects = rects.length > 0
@@ -2210,7 +2121,7 @@ export function ResponseCard({
       })
       dragStartPointerRef.current = null
     })
-  }, [annotations, closeSelectionMenu, triggerSelectionMenuEntryReplay, openFromSelection])
+  }, [annotations, closeSelectionMenu, getSurface, triggerSelectionMenuEntryReplay, openFromSelection])
 
   const handleTextSelection = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
     if (!canAnnotate || !onAddAnnotation || !messageId) return
@@ -2346,6 +2257,8 @@ export function ResponseCard({
       draft={followUpDraft}
       onDraftChange={setFollowUpDraft}
       onOpenFollowUp={handleOpenFollowUpView}
+      onHighlight={handleHighlight}
+      onCopyAsQuote={handleCopyAsQuote}
       onCancel={handleCancelFollowUp}
       onRequestBack={handleSelectionMenuRequestBack}
       onRequestEdit={handleRequestFollowUpEdit}
@@ -2469,6 +2382,12 @@ export function ResponseCard({
                 mode="minimal"
                 onUrlClick={onOpenUrl}
                 onFileClick={onOpenFile}
+                sessionId={sessionId}
+                annotations={annotations}
+                onAddAnnotation={boundAddAnnotation}
+                onRemoveAnnotation={boundRemoveAnnotation}
+                onUpdateAnnotation={boundUpdateAnnotation}
+                sendMessageKey={sendMessageKey}
               >
                 {text}
               </Markdown>
@@ -2594,6 +2513,12 @@ export function ResponseCard({
               mode="minimal"
               onUrlClick={onOpenUrl}
               onFileClick={onOpenFile}
+              sessionId={sessionId}
+              annotations={annotations}
+              onAddAnnotation={boundAddAnnotation}
+              onRemoveAnnotation={boundRemoveAnnotation}
+              onUpdateAnnotation={boundUpdateAnnotation}
+              sendMessageKey={sendMessageKey}
             >
               {displayedText}
             </Markdown>

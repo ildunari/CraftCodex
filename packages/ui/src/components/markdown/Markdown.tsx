@@ -4,6 +4,7 @@ import rehypeKatex from 'rehype-katex'
 import rehypeRaw from 'rehype-raw'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
+import type { AnnotationV1 } from '@craft-agent/core'
 import 'katex/dist/katex.min.css'
 import { cn } from '../../lib/utils'
 import { CodeBlock, InlineCode } from './CodeBlock'
@@ -16,6 +17,7 @@ import { MarkdownHtmlBlock } from './MarkdownHtmlBlock'
 import { MarkdownImageBlock } from './MarkdownImageBlock'
 import { MarkdownLatexBlock } from './MarkdownLatexBlock'
 import { MarkdownPdfBlock } from './MarkdownPdfBlock'
+import { MarkdownDocxBlock } from './MarkdownDocxBlock'
 import { preprocessLinks } from './linkify'
 import { resolveMarkdownLinkTarget } from './link-target'
 import remarkCollapsibleSections from './remarkCollapsibleSections'
@@ -71,6 +73,20 @@ export interface MarkdownProps {
    * @default true
    */
   hideFirstMermaidExpand?: boolean
+  /** Session ID for annotation context */
+  sessionId?: string
+  /** Annotations attached to this message */
+  annotations?: AnnotationV1[]
+  /** Callback to add an annotation */
+  onAddAnnotation?: (annotation: AnnotationV1) => void
+  /** Callback to remove an annotation */
+  onRemoveAnnotation?: (annotationId: string) => void
+  /** Callback to update an annotation */
+  onUpdateAnnotation?: (annotationId: string, patch: Partial<AnnotationV1>) => void
+  /** Input send key behavior used by follow-up editor */
+  sendMessageKey?: 'enter' | 'cmd-enter'
+  /** Callback to show a toast */
+  onToast?: (message: string) => void
 }
 
 /** Context for collapsible sections */
@@ -100,13 +116,25 @@ function stableHash(input: string): string {
   return (hash >>> 0).toString(36)
 }
 
+/** Annotation callbacks threaded to child block components */
+interface AnnotationForwardProps {
+  sessionId?: string
+  annotations?: AnnotationV1[]
+  onAddAnnotation?: (annotation: AnnotationV1) => void
+  onRemoveAnnotation?: (annotationId: string) => void
+  onUpdateAnnotation?: (annotationId: string, patch: Partial<AnnotationV1>) => void
+  sendMessageKey?: 'enter' | 'cmd-enter'
+  onToast?: (message: string) => void
+}
+
 function createComponents(
   mode: RenderMode,
   onUrlClick?: (url: string) => void,
   onFileClick?: (path: string) => void,
   collapsibleContext?: CollapsibleContext | null,
   firstMermaidCodeRef?: React.RefObject<string | null>,
-  hideFirstMermaidExpand: boolean = true
+  hideFirstMermaidExpand: boolean = true,
+  annotationProps?: AnnotationForwardProps,
 ): Partial<Components> {
   let blockIndex = 0
   const wrapBlock = (
@@ -248,11 +276,15 @@ function createComponents(
           }
           // HTML preview blocks → sandboxed iframe
           if (match?.[1] === 'html-preview') {
-            return wrapBlock('html-preview', code, <MarkdownHtmlBlock code={code} className="my-2" />, props.node?.position)
+            return wrapBlock('html-preview', code, <MarkdownHtmlBlock code={code} className="my-2" {...annotationProps} />, props.node?.position)
           }
           // PDF preview blocks → inline first page with expand to full viewer
           if (match?.[1] === 'pdf-preview') {
-            return wrapBlock('pdf-preview', code, <MarkdownPdfBlock code={code} className="my-2" />, props.node?.position)
+            return wrapBlock('pdf-preview', code, <MarkdownPdfBlock code={code} className="my-2" {...annotationProps} />, props.node?.position)
+          }
+          // DOCX preview blocks → rich document preview via docx-preview
+          if (match?.[1] === 'docx-preview') {
+            return wrapBlock('docx-preview', code, <MarkdownDocxBlock code={code} className="my-2" {...annotationProps} />, props.node?.position)
           }
           // Image preview blocks → inline image with expand to full viewer
           if (match?.[1] === 'image-preview') {
@@ -377,11 +409,15 @@ function createComponents(
         }
         // HTML preview blocks → sandboxed iframe
         if (match?.[1] === 'html-preview') {
-          return wrapBlock('html-preview', code, <MarkdownHtmlBlock code={code} className="my-2" />, props.node?.position)
+          return wrapBlock('html-preview', code, <MarkdownHtmlBlock code={code} className="my-2" {...annotationProps} />, props.node?.position)
         }
         // PDF preview blocks → inline first page with expand to full viewer
         if (match?.[1] === 'pdf-preview') {
-          return wrapBlock('pdf-preview', code, <MarkdownPdfBlock code={code} className="my-2" />, props.node?.position)
+          return wrapBlock('pdf-preview', code, <MarkdownPdfBlock code={code} className="my-2" {...annotationProps} />, props.node?.position)
+        }
+        // DOCX preview blocks → rich document preview via docx-preview
+        if (match?.[1] === 'docx-preview') {
+          return wrapBlock('docx-preview', code, <MarkdownDocxBlock code={code} className="my-2" {...annotationProps} />, props.node?.position)
         }
         // Image preview blocks → inline image with expand to full viewer
         if (match?.[1] === 'image-preview') {
@@ -510,6 +546,13 @@ export function Markdown({
   onFileClick,
   collapsible = false,
   hideFirstMermaidExpand = true,
+  sessionId,
+  annotations,
+  onAddAnnotation,
+  onRemoveAnnotation,
+  onUpdateAnnotation,
+  sendMessageKey,
+  onToast,
 }: MarkdownProps) {
   // Get collapsible context if enabled
   const collapsibleContext = useCollapsibleMarkdown()
@@ -527,9 +570,14 @@ export function Markdown({
     firstMermaidCodeRef.current = null
   }
 
+  const annotationForwardProps = React.useMemo<AnnotationForwardProps>(
+    () => ({ sessionId, annotations, onAddAnnotation, onRemoveAnnotation, onUpdateAnnotation, sendMessageKey, onToast }),
+    [sessionId, annotations, onAddAnnotation, onRemoveAnnotation, onUpdateAnnotation, sendMessageKey, onToast],
+  )
+
   const components = React.useMemo(
-    () => wrapWithSafeProxy(createComponents(mode, onUrlClick, onFileClick, collapsible ? collapsibleContext : null, firstMermaidCodeRef, hideFirstMermaidExpand)),
-    [mode, onUrlClick, onFileClick, collapsible, collapsibleContext, hideFirstMermaidExpand]
+    () => wrapWithSafeProxy(createComponents(mode, onUrlClick, onFileClick, collapsible ? collapsibleContext : null, firstMermaidCodeRef, hideFirstMermaidExpand, annotationForwardProps)),
+    [mode, onUrlClick, onFileClick, collapsible, collapsibleContext, hideFirstMermaidExpand, annotationForwardProps]
   )
 
   // Preprocess to convert raw URLs and file paths to markdown links

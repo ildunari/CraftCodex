@@ -23,6 +23,11 @@
  * Flash prevention: All cached items are rendered as hidden iframes (display:none/block).
  * Switching tabs toggles CSS visibility — no re-parse, no flash.
  *
+ * Annotation support: when annotation callbacks are provided, users can select
+ * text inside the HTML iframe and create highlights, follow-ups, or copy-as-quote
+ * via the AnnotationIslandMenu. Selection events are bridged from the iframe to
+ * the host document.
+ *
  * Security: iframe uses `sandbox` attribute without `allow-scripts`,
  * blocking all JavaScript execution. `allow-same-origin` is included
  * so CSS and images resolve correctly.
@@ -30,12 +35,39 @@
 
 import * as React from 'react'
 import { Globe, Maximize2 } from 'lucide-react'
+import type { AnnotationV1 } from '@craft-agent/core'
 import { cn } from '../../lib/utils'
 import { CodeBlock } from './CodeBlock'
+import { Tooltip, TooltipTrigger, TooltipContent } from '../tooltip'
 import { HTMLPreviewOverlay } from '../overlay/HTMLPreviewOverlay'
 import { ItemNavigator } from '../overlay/ItemNavigator'
 import { usePlatform } from '../../context/PlatformContext'
 import { useTranslation } from 'react-i18next'
+import { AnnotationIslandMenu } from '../annotations/AnnotationIslandMenu'
+import { HtmlAnnotationSurface } from '../annotations/HtmlAnnotationSurface'
+import { useAnnotationInteractionController } from '../annotations/use-annotation-interaction-controller'
+import { useAnnotationIslandPresentation } from '../annotations/use-annotation-island-presentation'
+import { useAnnotationIslandEvents } from '../annotations/use-annotation-island-events'
+import { useAnnotationCancelRestore } from '../annotations/use-annotation-cancel-restore'
+import {
+  getAnnotationInteractionAnchor,
+  getAnnotationInteractionSourceKey,
+  hasAnnotationInteraction,
+} from '../annotations/interaction-selectors'
+import {
+  type PointerSnapshot,
+  buildSelectionEntryTransition,
+  buildAnnotationChipEntryTransition,
+} from '../annotations/island-motion'
+import { formatCopyAsQuote } from '../annotations/follow-up-formatter-registry'
+import { sanitizeHtml, DOCX_CSP_META } from '../annotations/docx-sanitizer'
+import {
+  SELECTION_POINTER_MAX_AGE_MS,
+  clamp,
+  createTextSelectionAnnotation,
+} from '../annotations/annotation-core'
+import { clearDomSelection } from '../annotations/selection-restore'
+import type { IslandTransitionConfig } from '../ui'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -86,14 +118,53 @@ function injectBaseTarget(html: string): string {
   return `<head><base target="_top"></head>${html}`
 }
 
+/**
+ * Inject a Content-Security-Policy meta tag into the HTML for defense-in-depth.
+ * Blocks external resource loading even if the sandbox attribute is bypassed.
+ */
+function injectCspMeta(html: string): string {
+  if (html.includes('Content-Security-Policy')) return html
+  if (/<head[^>]*>/i.test(html)) {
+    return html.replace(/(<head[^>]*>)/i, `$1${DOCX_CSP_META}`)
+  }
+  if (/<html[^>]*>/i.test(html)) {
+    return html.replace(/(<html[^>]*>)/i, `$1<head>${DOCX_CSP_META}</head>`)
+  }
+  return `<head>${DOCX_CSP_META}</head>${html}`
+}
+
 // ── Main component ───────────────────────────────────────────────────────────
 
 export interface MarkdownHtmlBlockProps {
   code: string
   className?: string
+  /** Session ID for annotation context */
+  sessionId?: string
+  /** Annotations attached to this HTML block */
+  annotations?: AnnotationV1[]
+  /** Callback to add an annotation */
+  onAddAnnotation?: (annotation: AnnotationV1) => void
+  /** Callback to remove an annotation */
+  onRemoveAnnotation?: (annotationId: string) => void
+  /** Callback to update an annotation */
+  onUpdateAnnotation?: (annotationId: string, patch: Partial<AnnotationV1>) => void
+  /** Input send key behavior used by follow-up editor */
+  sendMessageKey?: 'enter' | 'cmd-enter'
+  /** Callback to show a toast */
+  onToast?: (message: string) => void
 }
 
-export function MarkdownHtmlBlock({ code, className }: MarkdownHtmlBlockProps) {
+export function MarkdownHtmlBlock({
+  code,
+  className,
+  sessionId,
+  annotations,
+  onAddAnnotation,
+  onRemoveAnnotation,
+  onUpdateAnnotation,
+  sendMessageKey = 'enter',
+  onToast,
+}: MarkdownHtmlBlockProps) {
   const { t } = useTranslation()
   const { onReadFile } = usePlatform()
 
@@ -132,6 +203,13 @@ export function MarkdownHtmlBlock({ code, className }: MarkdownHtmlBlockProps) {
   const activeItem = items[activeIndex]
   const activeHtml = activeItem ? contentCache[activeItem.src] : undefined
 
+  // Refs for inline annotation
+  const contentAreaRef = React.useRef<HTMLDivElement>(null)
+  const iframeRefs = React.useRef<Map<string, HTMLIFrameElement>>(new Map())
+  const surfaceRef = React.useRef<HtmlAnnotationSurface | null>(null)
+  const lastPointerRef = React.useRef<PointerSnapshot | null>(null)
+  const dragStartPointerRef = React.useRef<PointerSnapshot | null>(null)
+
   // Load active item's content when it changes
   React.useEffect(() => {
     if (!activeItem?.src || !onReadFile) return
@@ -151,11 +229,13 @@ export function MarkdownHtmlBlock({ code, className }: MarkdownHtmlBlockProps) {
       .finally(() => setLoading(false))
   }, [activeItem?.src, onReadFile, contentCache])
 
-  // Preprocess all cached HTML (inject base target for links)
+  // Preprocess all cached HTML: sanitize, inject CSP meta tag, inject base target for links
   const processedCache = React.useMemo(() => {
     const result: Record<string, string> = {}
     for (const [src, html] of Object.entries(contentCache)) {
-      result[src] = injectBaseTarget(html)
+      const sanitized = sanitizeHtml(html)
+      const withBaseTarget = injectBaseTarget(sanitized)
+      result[src] = injectCspMeta(withBaseTarget)
     }
     return result
   }, [contentCache])
@@ -171,6 +251,327 @@ export function MarkdownHtmlBlock({ code, className }: MarkdownHtmlBlockProps) {
     setContentCache((prev) => ({ ...prev, [src]: content }))
     return content
   }, [contentCache, onReadFile])
+
+  // ---------------------------------------------------------------------------
+  // Annotation interaction state
+  // ---------------------------------------------------------------------------
+
+  const canAnnotate = Boolean(onAddAnnotation)
+
+  const interaction = useAnnotationInteractionController()
+  const {
+    state: interactionState,
+    setDraft: setFollowUpDraft,
+    openFromSelection,
+    openFollowUpFromSelection,
+    requestEdit,
+    cancelFollowUp,
+    closeAll,
+    markSubmitSuccess,
+  } = interaction
+
+  const pendingSelection = interactionState.pendingSelection
+  const selectionMenuView = interactionState.selectionMenuView
+  const followUpDraft = interactionState.followUpDraft
+  const followUpMode = interactionState.followUpMode
+
+  const [selectionMenuShowNonce, setSelectionMenuShowNonce] = React.useState(0)
+  const [selectionMenuTransitionConfig, setSelectionMenuTransitionConfig] = React.useState<IslandTransitionConfig>(
+    buildAnnotationChipEntryTransition()
+  )
+
+  const selectionMenuAnchor = getAnnotationInteractionAnchor(interactionState)
+  const selectionMenuSourceKey = getAnnotationInteractionSourceKey(interactionState, `html-inline:${activeItem?.src}`)
+
+  const {
+    renderAnchor: selectionMenuRenderAnchor,
+    renderSourceKey: selectionMenuRenderSourceKey,
+    isVisible: isSelectionMenuVisible,
+    openedAtRef: selectionMenuOpenedAtRef,
+    handleExitComplete: handleSelectionMenuExitComplete,
+  } = useAnnotationIslandPresentation({
+    anchor: selectionMenuAnchor,
+    sourceKey: selectionMenuSourceKey,
+  })
+
+  // ---------------------------------------------------------------------------
+  // Surface management
+  // ---------------------------------------------------------------------------
+
+  const getSurface = React.useCallback((): HtmlAnnotationSurface | null => {
+    if (!activeItem) {
+      surfaceRef.current = null
+      return null
+    }
+    const iframe = iframeRefs.current.get(activeItem.src)
+    if (!iframe) {
+      surfaceRef.current = null
+      return null
+    }
+    if (!surfaceRef.current) {
+      const label = activeItem.label || spec?.title || activeItem.src
+      surfaceRef.current = new HtmlAnnotationSurface(iframe, label)
+    }
+    return surfaceRef.current
+  }, [activeItem, spec?.title])
+
+  // Reset surface when active item changes
+  React.useEffect(() => {
+    surfaceRef.current = null
+    closeAll()
+  }, [activeIndex, closeAll])
+
+  const closeSelectionMenu = React.useCallback(() => {
+    closeAll()
+  }, [closeAll])
+
+  const isTargetInsideAnnotationIsland = React.useCallback((target: Node | null): boolean => {
+    if (!target) return false
+    const element = target instanceof Element ? target : target.parentElement
+    if (!element) return false
+    return !!element.closest('[data-ca-annotation-island="true"]')
+  }, [])
+
+  const triggerSelectionMenuEntryReplay = React.useCallback(() => {
+    setSelectionMenuShowNonce((prev) => prev + 1)
+  }, [])
+
+  // ---------------------------------------------------------------------------
+  // Selection handling
+  // ---------------------------------------------------------------------------
+
+  const showSelectionMenuFromCurrentSelection = React.useCallback(() => {
+    if (!canAnnotate) return
+
+    const surface = getSurface()
+    if (!surface) return
+
+    requestAnimationFrame(() => {
+      const captured = surface.captureSelection()
+
+      if (!captured || captured.scope.kind !== 'html') {
+        closeSelectionMenu()
+        return
+      }
+
+      const selRects = surface.getSelectionRects(captured)
+      const pointer = lastPointerRef.current
+      const hasRecentPointer = Boolean(pointer && (Date.now() - pointer.ts) <= SELECTION_POINTER_MAX_AGE_MS)
+      const pointerX = hasRecentPointer && pointer ? pointer.x : null
+
+      let anchorRect: DOMRect | undefined
+      if (selRects.length > 0) {
+        anchorRect = selRects.reduce((best, rect) => (rect.top < best.top ? rect : best))
+      }
+
+      if (!anchorRect) {
+        closeSelectionMenu()
+        return
+      }
+
+      const anchorX = pointerX != null
+        ? clamp(pointerX, anchorRect.left, anchorRect.right)
+        : (anchorRect.left + anchorRect.width / 2)
+      const anchorY = anchorRect.top - 8
+
+      const transition = buildSelectionEntryTransition(dragStartPointerRef.current, pointer)
+      setSelectionMenuTransitionConfig(transition)
+      triggerSelectionMenuEntryReplay()
+
+      openFromSelection({
+        start: 0,
+        end: 0,
+        selectedText: captured.selectedText,
+        prefix: captured.prefix,
+        suffix: captured.suffix,
+        anchorX,
+        anchorY,
+      })
+      dragStartPointerRef.current = null
+    })
+  }, [canAnnotate, getSurface, closeSelectionMenu, triggerSelectionMenuEntryReplay, openFromSelection])
+
+  // ---------------------------------------------------------------------------
+  // Iframe event bridging
+  // ---------------------------------------------------------------------------
+
+  React.useEffect(() => {
+    if (!canAnnotate || !activeItem) return
+
+    const iframe = iframeRefs.current.get(activeItem.src)
+    if (!iframe) return
+
+    let doc: Document | null = null
+    try {
+      doc = iframe.contentDocument
+    } catch {
+      return
+    }
+    if (!doc) return
+
+    const handleIframeMouseUp = (event: MouseEvent) => {
+      const iframeRect = iframe.getBoundingClientRect()
+      const hostX = event.clientX + iframeRect.left
+      const hostY = event.clientY + iframeRect.top
+
+      lastPointerRef.current = { x: hostX, y: hostY, ts: Date.now() }
+      showSelectionMenuFromCurrentSelection()
+    }
+
+    const handleIframeMouseDown = (event: MouseEvent) => {
+      const iframeRect = iframe.getBoundingClientRect()
+      const hostX = event.clientX + iframeRect.left
+      const hostY = event.clientY + iframeRect.top
+
+      const snapshot: PointerSnapshot = { x: hostX, y: hostY, ts: Date.now() }
+      dragStartPointerRef.current = snapshot
+      lastPointerRef.current = snapshot
+    }
+
+    try {
+      doc.addEventListener('mouseup', handleIframeMouseUp)
+      doc.addEventListener('mousedown', handleIframeMouseDown)
+    } catch {
+      return
+    }
+
+    return () => {
+      try {
+        doc!.removeEventListener('mouseup', handleIframeMouseUp)
+        doc!.removeEventListener('mousedown', handleIframeMouseDown)
+      } catch {
+        // iframe may be gone
+      }
+    }
+  // Re-attach when content loads for active item
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canAnnotate, activeItem?.src, activeHtml])
+
+  // ---------------------------------------------------------------------------
+  // Annotation handlers
+  // ---------------------------------------------------------------------------
+
+  const saveAnnotation = React.useCallback(async (note: string) => {
+    if (!pendingSelection || !onAddAnnotation || !activeItem) return
+
+    const annotation = createTextSelectionAnnotation(
+      `html:${activeItem.src}`,
+      {
+        start: pendingSelection.start,
+        end: pendingSelection.end,
+        selectedText: pendingSelection.selectedText,
+        prefix: pendingSelection.prefix,
+        suffix: pendingSelection.suffix,
+      },
+      note || undefined,
+      sessionId,
+    )
+
+    ;(annotation as AnnotationV1 & { meta: Record<string, unknown> }).meta = {
+      ...annotation.meta,
+      document: {
+        kind: 'html',
+        title: (activeItem.label || spec?.title) ?? undefined,
+      },
+    }
+
+    onAddAnnotation(annotation)
+
+    // Clear selection inside the iframe
+    try {
+      iframeRefs.current.get(activeItem.src)?.contentDocument?.getSelection()?.removeAllRanges()
+    } catch { /* cross-origin */ }
+    clearDomSelection()
+    markSubmitSuccess()
+  }, [pendingSelection, onAddAnnotation, activeItem, spec?.title, sessionId, markSubmitSuccess])
+
+  const handleHighlight = React.useCallback(() => {
+    if (!pendingSelection) return
+    void saveAnnotation('')
+  }, [pendingSelection, saveAnnotation])
+
+  const handleOpenFollowUpView = React.useCallback(() => {
+    if (!pendingSelection) return
+    try {
+      if (activeItem) {
+        iframeRefs.current.get(activeItem.src)?.contentDocument?.getSelection()?.removeAllRanges()
+      }
+    } catch { /* cross-origin */ }
+    clearDomSelection()
+    openFollowUpFromSelection()
+  }, [pendingSelection, openFollowUpFromSelection, activeItem])
+
+  const handleRequestFollowUpEdit = React.useCallback(() => {
+    requestEdit()
+  }, [requestEdit])
+
+  const handleSubmitFollowUp = React.useCallback((note: string) => {
+    void saveAnnotation(note)
+  }, [saveAnnotation])
+
+  const handleCopyAsQuote = React.useCallback(async () => {
+    if (!pendingSelection) return
+
+    const surface = getSurface()
+    const context = surface
+      ? surface.getFollowUpContext({
+          selectedText: pendingSelection.selectedText,
+          prefix: pendingSelection.prefix,
+          suffix: pendingSelection.suffix,
+          scope: { kind: 'html' },
+        })
+      : { surroundingText: pendingSelection.selectedText, documentType: 'html' }
+
+    try {
+      await navigator.clipboard.writeText(formatCopyAsQuote(pendingSelection.selectedText, context))
+    } catch { /* Clipboard API blocked */ }
+
+    try {
+      if (activeItem) {
+        iframeRefs.current.get(activeItem.src)?.contentDocument?.getSelection()?.removeAllRanges()
+      }
+    } catch { /* cross-origin */ }
+    clearDomSelection()
+    closeSelectionMenu()
+  }, [pendingSelection, getSurface, closeSelectionMenu, activeItem])
+
+  const handleCancelFollowUp = useAnnotationCancelRestore({
+    contentRootRef: contentAreaRef,
+    cancelFollowUp,
+  })
+
+  const handleSelectionMenuRequestBack = React.useCallback((): boolean => {
+    if (selectionMenuView !== 'compact') {
+      handleCancelFollowUp()
+      return true
+    }
+    return false
+  }, [selectionMenuView, handleCancelFollowUp])
+
+  // ---------------------------------------------------------------------------
+  // Island events
+  // ---------------------------------------------------------------------------
+
+  useAnnotationIslandEvents({
+    enabled: canAnnotate && hasAnnotationInteraction(interactionState) && isSelectionMenuVisible,
+    openedAtRef: selectionMenuOpenedAtRef,
+    isCompactView: selectionMenuView === 'compact',
+    isTargetInsideAnnotationIsland,
+    onBack: handleSelectionMenuRequestBack,
+    onClose: closeSelectionMenu,
+  })
+
+  // ---------------------------------------------------------------------------
+  // Iframe ref callback
+  // ---------------------------------------------------------------------------
+
+  const setIframeRef = React.useCallback((src: string) => (el: HTMLIFrameElement | null) => {
+    if (el) {
+      iframeRefs.current.set(src, el)
+    } else {
+      iframeRefs.current.delete(src)
+    }
+  }, [])
 
   // Invalid spec → fall back to code block
   if (!spec || items.length === 0) {
@@ -190,24 +591,31 @@ export function MarkdownHtmlBlock({ code, className }: MarkdownHtmlBlockProps) {
           </span>
           <div className="flex items-center gap-1">
             <ItemNavigator items={items} activeIndex={activeIndex} onSelect={setActiveIndex} />
-            <button
-              onClick={() => setIsFullscreen(true)}
-              className={cn(
-                "p-1 rounded-[6px] transition-all select-none",
-                "bg-background shadow-minimal",
-                "text-muted-foreground/50 hover:text-foreground",
-                "focus:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:opacity-100",
-                hasMultiple ? "opacity-100" : "opacity-0 group-hover:opacity-100"
-              )}
-              title={t('common.viewFullscreen')}
-            >
-              <Maximize2 className="w-3.5 h-3.5" />
-            </button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  onClick={() => setIsFullscreen(true)}
+                  className={cn(
+                    "p-1 rounded-[6px] transition-all select-none",
+                    "bg-background shadow-minimal",
+                    "text-muted-foreground/50 hover:text-foreground",
+                    "focus:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:opacity-100",
+                    hasMultiple ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                  )}
+                  title={t('common.viewFullscreen')}
+                >
+                  <Maximize2 className="w-3.5 h-3.5" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" className="text-xs">
+                Open fullscreen to annotate
+              </TooltipContent>
+            </Tooltip>
           </div>
         </div>
 
         {/* Content area: hidden iframes for cached items + loading/error for uncached active */}
-        <div className="relative max-h-[400px] overflow-hidden">
+        <div ref={contentAreaRef} className="relative max-h-[400px] overflow-hidden">
           {/* Render all cached items as hidden iframes — prevents flash on tab switch */}
           {items.map((item, i) => {
             const processed = processedCache[item.src]
@@ -215,6 +623,7 @@ export function MarkdownHtmlBlock({ code, className }: MarkdownHtmlBlockProps) {
             return (
               <iframe
                 key={item.src}
+                ref={setIframeRef(item.src)}
                 sandbox="allow-same-origin allow-top-navigation-by-user-activation"
                 srcDoc={processed}
                 title={item.label || spec.title || t('preview.htmlPreview')}
@@ -247,9 +656,34 @@ export function MarkdownHtmlBlock({ code, className }: MarkdownHtmlBlockProps) {
             />
           )}
         </div>
+
+        {/* Inline Annotation Island Menu */}
+        {canAnnotate && (
+          <AnnotationIslandMenu
+            anchor={selectionMenuRenderAnchor}
+            sourceKey={selectionMenuRenderSourceKey}
+            replayNonce={selectionMenuShowNonce}
+            isVisible={isSelectionMenuVisible}
+            activeView={selectionMenuView}
+            mode={followUpMode}
+            draft={followUpDraft}
+            onDraftChange={setFollowUpDraft}
+            onOpenFollowUp={handleOpenFollowUpView}
+            onHighlight={handleHighlight}
+            onCopyAsQuote={handleCopyAsQuote}
+            onCancel={handleCancelFollowUp}
+            onRequestBack={handleSelectionMenuRequestBack}
+            onRequestEdit={handleRequestFollowUpEdit}
+            onSubmit={handleSubmitFollowUp}
+            sendMessageKey={sendMessageKey}
+            transitionConfig={selectionMenuTransitionConfig}
+            onExitComplete={handleSelectionMenuExitComplete}
+            usePortal={true}
+          />
+        )}
       </div>
 
-      {/* Fullscreen overlay — passes items for multi-item navigation */}
+      {/* Fullscreen overlay — passes items for multi-item navigation + annotation props */}
       <HTMLPreviewOverlay
         isOpen={isFullscreen}
         onClose={() => setIsFullscreen(false)}
@@ -258,8 +692,14 @@ export function MarkdownHtmlBlock({ code, className }: MarkdownHtmlBlockProps) {
         onLoadContent={handleLoadContent}
         initialIndex={activeIndex}
         title={spec.title}
+        sessionId={sessionId}
+        annotations={annotations}
+        onAddAnnotation={onAddAnnotation}
+        onRemoveAnnotation={onRemoveAnnotation}
+        onUpdateAnnotation={onUpdateAnnotation}
+        sendMessageKey={sendMessageKey}
+        onToast={onToast}
       />
     </HtmlBlockErrorBoundary>
   )
 }
-

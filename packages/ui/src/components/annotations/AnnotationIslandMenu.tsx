@@ -1,6 +1,6 @@
 import * as React from 'react'
 import * as ReactDOM from 'react-dom'
-import { CornerDownRight } from 'lucide-react'
+import { CornerDownRight, Highlighter, Quote } from 'lucide-react'
 import {
   Island,
   IslandContentView,
@@ -26,6 +26,8 @@ export interface AnnotationIslandMenuProps {
   draft: string
   onDraftChange: (next: string) => void
   onOpenFollowUp: () => void
+  onHighlight?: () => void
+  onCopyAsQuote?: () => void
   onCancel: () => void
   onRequestBack?: () => boolean
   onRequestEdit: () => void
@@ -49,6 +51,8 @@ export function AnnotationIslandMenu({
   draft,
   onDraftChange,
   onOpenFollowUp,
+  onHighlight,
+  onCopyAsQuote,
   onCancel,
   onRequestBack,
   onRequestEdit,
@@ -114,6 +118,20 @@ export function AnnotationIslandMenu({
       >
         <IslandContentView id="compact" anchorX="center" anchorY="bottom">
           <div className="p-1 flex items-center gap-1">
+            {onHighlight && (
+              <button
+                type="button"
+                onClick={onHighlight}
+                className={cn(
+                  'h-[30px] px-2.5 rounded-[8px] text-[13px] font-medium inline-flex items-center gap-1.5',
+                  'text-foreground/85 hover:text-foreground hover:bg-foreground/5',
+                  'focus:outline-none focus-visible:ring-1 focus-visible:ring-ring'
+                )}
+              >
+                <Highlighter className="h-3.5 w-3.5" />
+                <span>Highlight</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={onOpenFollowUp}
@@ -126,6 +144,20 @@ export function AnnotationIslandMenu({
               <CornerDownRight className="h-3.5 w-3.5" />
               <span>{t('chat.followUp')}</span>
             </button>
+            {onCopyAsQuote && (
+              <button
+                type="button"
+                onClick={onCopyAsQuote}
+                className={cn(
+                  'h-[30px] px-2.5 rounded-[8px] text-[13px] font-medium inline-flex items-center gap-1.5',
+                  'text-foreground/85 hover:text-foreground hover:bg-foreground/5',
+                  'focus:outline-none focus-visible:ring-1 focus-visible:ring-ring'
+                )}
+              >
+                <Quote className="h-3.5 w-3.5" />
+                <span>Quote</span>
+              </button>
+            )}
           </div>
         </IslandContentView>
 

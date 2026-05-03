@@ -6,15 +6,27 @@
  *
  * The PDF is loaded from a Uint8Array (via IPC) and rendered to canvas.
  * The pdf.js worker handles decoding and rendering in a background thread.
+ *
+ * Annotation support: when annotation callbacks are provided, users can select
+ * text on PDF pages and create highlights, follow-ups, or copy-as-quote via the
+ * AnnotationIslandMenu. Cross-page selections are rejected with a toast.
  */
 
-import { useState, useCallback, useMemo, useEffect } from 'react'
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Document, Page, pdfjs } from 'react-pdf'
+import type { PDFDocumentProxy } from 'pdfjs-dist/types/src/display/api'
 import { FileText } from 'lucide-react'
+import type { AnnotationV1 } from '@craft-agent/core'
 import { PreviewOverlay } from './PreviewOverlay'
 import { CopyButton } from './CopyButton'
 import { ItemNavigator } from './ItemNavigator'
+import { AnnotationIslandMenu } from '../annotations/AnnotationIslandMenu'
+import { AnnotationOverlayLayer } from '../annotations/AnnotationOverlayLayer'
+import { PdfAnnotationSurface } from '../annotations/PdfAnnotationSurface'
+import { usePreviewAnnotationInteraction } from '../annotations/use-preview-annotation-interaction'
+import type { PointerSnapshot } from '../annotations/island-motion'
+import { shouldIgnoreSelectionMouseUpTarget } from '../annotations/interaction-policy'
 import 'react-pdf/dist/Page/AnnotationLayer.css'
 import 'react-pdf/dist/Page/TextLayer.css'
 
@@ -39,6 +51,20 @@ export interface PDFPreviewOverlayProps {
   /** Async loader that returns PDF data as Uint8Array */
   loadPdfData: (path: string) => Promise<Uint8Array>
   theme?: 'light' | 'dark'
+  /** Session ID for annotation context */
+  sessionId?: string
+  /** Annotations attached to this PDF */
+  annotations?: AnnotationV1[]
+  /** Callback to add an annotation */
+  onAddAnnotation?: (annotation: AnnotationV1) => void
+  /** Callback to remove an annotation */
+  onRemoveAnnotation?: (annotationId: string) => void
+  /** Callback to update an annotation */
+  onUpdateAnnotation?: (annotationId: string, patch: Partial<AnnotationV1>) => void
+  /** Input send key behavior used by follow-up editor */
+  sendMessageKey?: 'enter' | 'cmd-enter'
+  /** Callback to show a toast (for cross-page selection, scanned page, etc.) */
+  onToast?: (message: string) => void
 }
 
 export function PDFPreviewOverlay({
@@ -49,6 +75,13 @@ export function PDFPreviewOverlay({
   initialIndex = 0,
   loadPdfData,
   theme = 'light',
+  sessionId,
+  annotations,
+  onAddAnnotation,
+  onRemoveAnnotation,
+  onUpdateAnnotation,
+  sendMessageKey = 'enter',
+  onToast,
 }: PDFPreviewOverlayProps) {
   const { t } = useTranslation()
 
@@ -65,6 +98,152 @@ export function PDFPreviewOverlay({
   const [isLoading, setIsLoading] = useState(false)
 
   const activeItem = resolvedItems[activeIdx]
+
+  // Refs for annotation system
+  const pdfContentRef = useRef<HTMLDivElement>(null)
+  const pdfDocRef = useRef<PDFDocumentProxy | null>(null)
+  const surfaceRef = useRef<PdfAnnotationSurface | null>(null)
+
+  // ---------------------------------------------------------------------------
+  // Surface management
+  // ---------------------------------------------------------------------------
+
+  const getSurface = useCallback((): PdfAnnotationSurface | null => {
+    const container = pdfContentRef.current
+    const doc = pdfDocRef.current
+    if (!container || !doc) {
+      surfaceRef.current = null
+      return null
+    }
+    // Re-create if container changed or doc changed
+    if (!surfaceRef.current) {
+      const getPage = (pageNumber: number) => doc.getPage(pageNumber)
+      const fileName = activeItem?.label || activeItem?.src?.split('/').pop()
+      surfaceRef.current = new PdfAnnotationSurface(container, getPage, fileName)
+    }
+    return surfaceRef.current
+  }, [activeItem?.src, activeItem?.label])
+
+  // ---------------------------------------------------------------------------
+  // Annotation interaction (shared hook)
+  // ---------------------------------------------------------------------------
+
+  const buildDocumentMeta = useCallback(() => {
+    const surface = getSurface()
+    const captured = surface?.captureSelection()
+    const pageNumber = captured?.scope.kind === 'pdf' ? (captured.scope as { pageNumber?: number }).pageNumber : undefined
+
+    return {
+      kind: 'pdf',
+      title: (activeItem?.label || activeItem?.src?.split('/').pop()) ?? undefined,
+      page: pageNumber ?? 1,
+    }
+  }, [getSurface, activeItem?.label, activeItem?.src])
+
+  const onEmptyCapture = useCallback(() => {
+    // Check if we're on a page without text layer (scanned page)
+    const sel = window.getSelection()
+    if (sel && sel.rangeCount > 0) {
+      const range = sel.getRangeAt(0)
+      const pageEl = (range.startContainer.nodeType === Node.ELEMENT_NODE
+        ? range.startContainer as HTMLElement
+        : range.startContainer.parentElement
+      )?.closest('.react-pdf__Page')
+
+      if (pageEl) {
+        const textLayer = pageEl.querySelector('.react-pdf__Page__textContent')
+        if (!textLayer || !textLayer.textContent?.trim()) {
+          onToast?.('Text selection unavailable for this page')
+        }
+      }
+    }
+  }, [onToast])
+
+  const getSelectionAnchorRects = useCallback(() => {
+    const selection = window.getSelection()
+    const range = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null
+    return range
+      ? Array.from(range.getClientRects()).filter(r => r.width > 0 && r.height > 0)
+      : []
+  }, [])
+
+  const annotationInteraction = usePreviewAnnotationInteraction({
+    isOpen,
+    onAddAnnotation,
+    onRemoveAnnotation,
+    annotations,
+    sourceId: `pdf:${activeItem?.src || filePath}`,
+    sourceKeySegment: `pdf:${activeItem?.src}`,
+    sessionId,
+    sendMessageKey,
+    contentRootRef: pdfContentRef,
+    getSurface,
+    buildDocumentMeta,
+    expectedScopeKind: 'pdf',
+    getSelectionAnchorRects,
+    onEmptyCapture,
+    overlayRectDeps: [numPages],
+  })
+
+  const {
+    canAnnotate,
+    handleSelectionPointerDown,
+    showSelectionMenuFromCurrentSelection,
+    closeSelectionMenu,
+    annotationOverlayRects,
+    islandMenuProps,
+    overlayLayerProps,
+  } = annotationInteraction
+
+  // ---------------------------------------------------------------------------
+  // PDF-specific: cross-page selection detection on mouseup
+  // ---------------------------------------------------------------------------
+
+  const handleTextSelection = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    if (!canAnnotate) return
+    if (shouldIgnoreSelectionMouseUpTarget(event.target)) return
+
+    annotationInteraction.lastPointerRef.current = {
+      x: event.clientX,
+      y: event.clientY,
+      ts: Date.now(),
+    } satisfies PointerSnapshot
+
+    // Detect cross-page selection
+    const sel = window.getSelection()
+    if (sel && sel.rangeCount > 0) {
+      const range = sel.getRangeAt(0)
+      const startPage = (range.startContainer.nodeType === Node.ELEMENT_NODE
+        ? range.startContainer as HTMLElement
+        : range.startContainer.parentElement
+      )?.closest('.react-pdf__Page')
+      const endPage = (range.endContainer.nodeType === Node.ELEMENT_NODE
+        ? range.endContainer as HTMLElement
+        : range.endContainer.parentElement
+      )?.closest('.react-pdf__Page')
+
+      if (startPage && endPage && startPage !== endPage) {
+        onToast?.('Select text within a single page')
+        closeSelectionMenu()
+        return
+      }
+    }
+
+    showSelectionMenuFromCurrentSelection()
+  }, [canAnnotate, annotationInteraction.lastPointerRef, showSelectionMenuFromCurrentSelection, closeSelectionMenu, onToast])
+
+  // ---------------------------------------------------------------------------
+  // Close / cleanup
+  // ---------------------------------------------------------------------------
+
+  // Reset annotation state when overlay closes or active item changes
+  useEffect(() => {
+    closeSelectionMenu()
+    surfaceRef.current = null
+    if (!isOpen) {
+      pdfDocRef.current = null
+    }
+  }, [isOpen, activeIdx, closeSelectionMenu])
 
   // Reset index when overlay opens
   useEffect(() => {
@@ -100,8 +279,10 @@ export function PDFPreviewOverlay({
     return () => { cancelled = true }
   }, [isOpen, activeItem?.src, loadPdfData])
 
-  const onDocumentLoadSuccess = useCallback(({ numPages }: { numPages: number }) => {
-    setNumPages(numPages)
+  const onDocumentLoadSuccess = useCallback((pdf: { numPages: number } & PDFDocumentProxy) => {
+    setNumPages(pdf.numPages)
+    pdfDocRef.current = pdf
+    surfaceRef.current = null // Reset surface so it picks up new doc
   }, [])
 
   const onDocumentLoadError = useCallback((error: Error) => {
@@ -113,6 +294,26 @@ export function PDFPreviewOverlay({
     pdfData ? { data: pdfData } : null,
     [pdfData]
   )
+
+  // Handle mouseup outside PDF content (drag started inside, ended outside)
+  useEffect(() => {
+    if (!canAnnotate || !isOpen) return
+
+    const handleDocumentMouseUp = (event: MouseEvent) => {
+      const root = pdfContentRef.current
+      if (!root) return
+
+      const target = event.target as Node | null
+      if (target && root.contains(target)) return // handled by onMouseUp
+
+      showSelectionMenuFromCurrentSelection()
+    }
+
+    document.addEventListener('mouseup', handleDocumentMouseUp)
+    return () => {
+      document.removeEventListener('mouseup', handleDocumentMouseUp)
+    }
+  }, [canAnnotate, isOpen, showSelectionMenuFromCurrentSelection])
 
   // Header actions: item navigation + copy button
   const headerActions = (
@@ -136,7 +337,12 @@ export function PDFPreviewOverlay({
       error={error ? { label: 'Load Failed', message: error } : undefined}
       headerActions={headerActions}
     >
-      <div className="h-full flex flex-col items-center overflow-auto">
+      <div
+        ref={pdfContentRef}
+        className="h-full flex flex-col items-center overflow-auto relative"
+        onMouseDown={canAnnotate ? handleSelectionPointerDown : undefined}
+        onMouseUp={canAnnotate ? handleTextSelection : undefined}
+      >
         {isLoading && (
           <div className="text-muted-foreground text-sm">{t('preview.loadingPdf')}</div>
         )}
@@ -158,7 +364,17 @@ export function PDFPreviewOverlay({
             ))}
           </Document>
         )}
+
+        {/* Annotation highlight overlay */}
+        {annotationOverlayRects.length > 0 && (
+          <AnnotationOverlayLayer {...overlayLayerProps} />
+        )}
       </div>
+
+      {/* Annotation Island Menu */}
+      {canAnnotate && (
+        <AnnotationIslandMenu {...islandMenuProps} />
+      )}
     </PreviewOverlay>
   )
 }

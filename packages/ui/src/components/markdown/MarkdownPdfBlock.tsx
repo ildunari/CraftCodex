@@ -30,10 +30,12 @@
 import * as React from 'react'
 import { FileText, Maximize2 } from 'lucide-react'
 import { Document, Page, pdfjs } from 'react-pdf'
+import type { AnnotationV1 } from '@craft-agent/core'
 import { cn } from '../../lib/utils'
 import { CodeBlock } from './CodeBlock'
 import { PDFPreviewOverlay } from '../overlay/PDFPreviewOverlay'
 import { ItemNavigator } from '../overlay/ItemNavigator'
+import { Tooltip, TooltipTrigger, TooltipContent } from '../tooltip'
 import { usePlatform } from '../../context/PlatformContext'
 import { useTranslation } from 'react-i18next'
 import 'react-pdf/dist/Page/AnnotationLayer.css'
@@ -79,9 +81,34 @@ export interface MarkdownPdfBlockProps {
   code: string
   className?: string
   onCreateRegionAnnotation?: (region: { page?: number; x: number; y: number; w: number; h: number; unit: 'pixel' | 'percent' }) => void
+  /** Session ID for annotation context */
+  sessionId?: string
+  /** Annotations attached to this PDF block */
+  annotations?: AnnotationV1[]
+  /** Callback to add an annotation */
+  onAddAnnotation?: (annotation: AnnotationV1) => void
+  /** Callback to remove an annotation */
+  onRemoveAnnotation?: (annotationId: string) => void
+  /** Callback to update an annotation */
+  onUpdateAnnotation?: (annotationId: string, patch: Partial<AnnotationV1>) => void
+  /** Input send key behavior used by follow-up editor */
+  sendMessageKey?: 'enter' | 'cmd-enter'
+  /** Callback to show a toast */
+  onToast?: (message: string) => void
 }
 
-export function MarkdownPdfBlock({ code, className, onCreateRegionAnnotation: _onCreateRegionAnnotation }: MarkdownPdfBlockProps) {
+export function MarkdownPdfBlock({
+  code,
+  className,
+  onCreateRegionAnnotation: _onCreateRegionAnnotation,
+  sessionId,
+  annotations,
+  onAddAnnotation,
+  onRemoveAnnotation,
+  onUpdateAnnotation,
+  sendMessageKey,
+  onToast,
+}: MarkdownPdfBlockProps) {
   const { t } = useTranslation()
   const { onReadFileBinary } = usePlatform()
 
@@ -178,19 +205,26 @@ export function MarkdownPdfBlock({ code, className, onCreateRegionAnnotation: _o
           </span>
           <div className="flex items-center gap-1">
             <ItemNavigator items={items} activeIndex={activeIndex} onSelect={setActiveIndex} />
-            <button
-              onClick={() => setIsFullscreen(true)}
-              className={cn(
-                "p-1 rounded-[6px] transition-all select-none",
-                "bg-background shadow-minimal",
-                "text-muted-foreground/50 hover:text-foreground",
-                "focus:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:opacity-100",
-                hasMultiple ? "opacity-100" : "opacity-0 group-hover:opacity-100"
-              )}
-              title={t('common.viewFullscreen')}
-            >
-              <Maximize2 className="w-3.5 h-3.5" />
-            </button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  onClick={() => setIsFullscreen(true)}
+                  className={cn(
+                    "p-1 rounded-[6px] transition-all select-none",
+                    "bg-background shadow-minimal",
+                    "text-muted-foreground/50 hover:text-foreground",
+                    "focus:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:opacity-100",
+                    hasMultiple ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                  )}
+                  title={t('common.viewFullscreen')}
+                >
+                  <Maximize2 className="w-3.5 h-3.5" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" className="text-xs">
+                Open fullscreen to annotate
+              </TooltipContent>
+            </Tooltip>
           </div>
         </div>
 
@@ -245,6 +279,13 @@ export function MarkdownPdfBlock({ code, className, onCreateRegionAnnotation: _o
         items={items}
         initialIndex={activeIndex}
         loadPdfData={loadPdfData}
+        sessionId={sessionId}
+        annotations={annotations}
+        onAddAnnotation={onAddAnnotation}
+        onRemoveAnnotation={onRemoveAnnotation}
+        onUpdateAnnotation={onUpdateAnnotation}
+        sendMessageKey={sendMessageKey}
+        onToast={onToast}
       />
     </PdfBlockErrorBoundary>
   )

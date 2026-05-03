@@ -8,14 +8,25 @@
  * Supports multiple items with arrow navigation in the header.
  * The iframe auto-sizes to its content height by reading contentDocument.scrollHeight
  * on load (possible because allow-same-origin is set).
+ *
+ * Annotation support: when annotation callbacks are provided, users can select
+ * text inside the HTML iframe and create highlights, follow-ups, or copy-as-quote
+ * via the AnnotationIslandMenu. Selection events are bridged from the iframe to
+ * the host document via mouseup forwarding.
  */
 
 import * as React from 'react'
 import { useTranslation } from 'react-i18next'
 import { Globe } from 'lucide-react'
+import type { AnnotationV1 } from '@craft-agent/core'
 import { PreviewOverlay } from './PreviewOverlay'
 import { CopyButton } from './CopyButton'
 import { ItemNavigator } from './ItemNavigator'
+import { AnnotationIslandMenu } from '../annotations/AnnotationIslandMenu'
+import { AnnotationOverlayLayer } from '../annotations/AnnotationOverlayLayer'
+import { HtmlAnnotationSurface } from '../annotations/HtmlAnnotationSurface'
+import { usePreviewAnnotationInteraction } from '../annotations/use-preview-annotation-interaction'
+import type { PointerSnapshot } from '../annotations/island-motion'
 
 /**
  * Inject `<base target="_top">` so link clicks navigate the top frame,
@@ -56,6 +67,20 @@ export interface HTMLPreviewOverlayProps {
   title?: string
   /** Theme mode for dark/light styling */
   theme?: 'light' | 'dark'
+  /** Session ID for annotation context */
+  sessionId?: string
+  /** Annotations attached to this HTML preview */
+  annotations?: AnnotationV1[]
+  /** Callback to add an annotation */
+  onAddAnnotation?: (annotation: AnnotationV1) => void
+  /** Callback to remove an annotation */
+  onRemoveAnnotation?: (annotationId: string) => void
+  /** Callback to update an annotation */
+  onUpdateAnnotation?: (annotationId: string, patch: Partial<AnnotationV1>) => void
+  /** Input send key behavior used by follow-up editor */
+  sendMessageKey?: 'enter' | 'cmd-enter'
+  /** Callback to show a toast */
+  onToast?: (message: string) => void
 }
 
 export function HTMLPreviewOverlay({
@@ -68,6 +93,13 @@ export function HTMLPreviewOverlay({
   initialIndex = 0,
   title,
   theme,
+  sessionId,
+  annotations,
+  onAddAnnotation,
+  onRemoveAnnotation,
+  onUpdateAnnotation,
+  sendMessageKey = 'enter',
+  onToast,
 }: HTMLPreviewOverlayProps) {
   // Normalize: single html prop → single item, or use items array
   const { t } = useTranslation()
@@ -79,6 +111,7 @@ export function HTMLPreviewOverlay({
 
   const [activeIdx, setActiveIdx] = React.useState(initialIndex)
   const iframeRef = React.useRef<HTMLIFrameElement>(null)
+  const htmlContentRef = React.useRef<HTMLDivElement>(null)
   const [contentSize, setContentSize] = React.useState<{ width: number; height: number } | null>(null)
 
   // Internal content cache (merges external + locally loaded)
@@ -96,6 +129,81 @@ export function HTMLPreviewOverlay({
 
   const activeItem = resolvedItems[activeIdx]
   const activeContent = activeItem ? mergedCache[activeItem.src] : undefined
+
+  // Refs for annotation system
+  const surfaceRef = React.useRef<HtmlAnnotationSurface | null>(null)
+
+  // ---------------------------------------------------------------------------
+  // Surface management
+  // ---------------------------------------------------------------------------
+
+  const getSurface = React.useCallback((): HtmlAnnotationSurface | null => {
+    const iframe = iframeRef.current
+    if (!iframe) {
+      surfaceRef.current = null
+      return null
+    }
+    if (!surfaceRef.current) {
+      const label = activeItem?.label || title || activeItem?.src
+      surfaceRef.current = new HtmlAnnotationSurface(iframe, label)
+    }
+    return surfaceRef.current
+  }, [activeItem?.src, activeItem?.label, title])
+
+  // ---------------------------------------------------------------------------
+  // Annotation interaction (shared hook)
+  // ---------------------------------------------------------------------------
+
+  const buildDocumentMeta = React.useCallback(() => ({
+    kind: 'html',
+    title: (activeItem?.label || title) ?? undefined,
+  }), [activeItem?.label, title])
+
+  const clearSurfaceSelection = React.useCallback(() => {
+    try {
+      iframeRef.current?.contentDocument?.getSelection()?.removeAllRanges()
+    } catch {
+      // Cross-origin
+    }
+  }, [])
+
+  const annotationInteraction = usePreviewAnnotationInteraction({
+    isOpen,
+    onAddAnnotation,
+    onRemoveAnnotation,
+    annotations,
+    sourceId: `html:${activeItem?.src || '__single__'}`,
+    sourceKeySegment: `html:${activeItem?.src}`,
+    sessionId,
+    sendMessageKey,
+    contentRootRef: htmlContentRef,
+    getSurface,
+    buildDocumentMeta,
+    expectedScopeKind: 'html',
+    clearSurfaceSelection,
+    overlayRectDeps: [contentSize],
+  })
+
+  const {
+    canAnnotate,
+    handleSelectionPointerDown,
+    handleTextSelection,
+    showSelectionMenuFromCurrentSelection,
+    closeSelectionMenu,
+    annotationOverlayRects,
+    islandMenuProps,
+    overlayLayerProps,
+  } = annotationInteraction
+
+  // ---------------------------------------------------------------------------
+  // Close / cleanup
+  // ---------------------------------------------------------------------------
+
+  // Reset annotation state when overlay closes or active item changes
+  React.useEffect(() => {
+    closeSelectionMenu()
+    surfaceRef.current = null
+  }, [isOpen, activeIdx, closeSelectionMenu])
 
   // Reset index when overlay opens
   React.useEffect(() => {
@@ -153,6 +261,9 @@ export function HTMLPreviewOverlay({
     } catch {
       // Cross-origin access denied
     }
+
+    // Reset surface when iframe reloads (new content)
+    surfaceRef.current = null
   }, [])
 
   const iframeHeight = contentSize
@@ -160,6 +271,58 @@ export function HTMLPreviewOverlay({
     : 'calc(100vh - 200px)'
 
   const measured = contentSize !== null
+
+  // ---------------------------------------------------------------------------
+  // Iframe mouseup bridging — capture selections from inside the iframe
+  // ---------------------------------------------------------------------------
+
+  React.useEffect(() => {
+    if (!canAnnotate || !isOpen) return
+
+    const iframe = iframeRef.current
+    if (!iframe) return
+
+    const doc = iframe.contentDocument
+    if (!doc) return
+
+    const handleIframeMouseUp = (event: MouseEvent) => {
+      // Translate iframe-local coords to host-document coords
+      const iframeRect = iframe.getBoundingClientRect()
+      const hostX = event.clientX + iframeRect.left
+      const hostY = event.clientY + iframeRect.top
+
+      annotationInteraction.lastPointerRef.current = { x: hostX, y: hostY, ts: Date.now() }
+      showSelectionMenuFromCurrentSelection()
+    }
+
+    const handleIframeMouseDown = (event: MouseEvent) => {
+      const iframeRect = iframe.getBoundingClientRect()
+      const hostX = event.clientX + iframeRect.left
+      const hostY = event.clientY + iframeRect.top
+
+      const snapshot: PointerSnapshot = { x: hostX, y: hostY, ts: Date.now() }
+      annotationInteraction.dragStartPointerRef.current = snapshot
+      annotationInteraction.lastPointerRef.current = snapshot
+    }
+
+    try {
+      doc.addEventListener('mouseup', handleIframeMouseUp)
+      doc.addEventListener('mousedown', handleIframeMouseDown)
+    } catch {
+      return // Cross-origin
+    }
+
+    return () => {
+      try {
+        doc.removeEventListener('mouseup', handleIframeMouseUp)
+        doc.removeEventListener('mousedown', handleIframeMouseDown)
+      } catch {
+        // Cross-origin
+      }
+    }
+  // Re-attach when iframe content changes (processedHtml triggers reload)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canAnnotate, isOpen, processedHtml, contentSize])
 
   // Header actions: item navigation + copy button
   const headerActions = (
@@ -182,7 +345,12 @@ export function HTMLPreviewOverlay({
       title={title || activeItem?.label || 'HTML Preview'}
       headerActions={headerActions}
     >
-      <div className="px-6 pb-6">
+      <div
+        ref={htmlContentRef}
+        className="px-6 pb-6 relative"
+        onMouseDown={canAnnotate ? handleSelectionPointerDown : undefined}
+        onMouseUp={canAnnotate ? handleTextSelection : undefined}
+      >
         {loadingItem && !activeContent && (
           <div className="py-12 text-center text-muted-foreground text-sm">{t('common.loading')}</div>
         )}
@@ -210,7 +378,17 @@ export function HTMLPreviewOverlay({
             />
           </div>
         )}
+
+        {/* Annotation highlight overlay */}
+        {annotationOverlayRects.length > 0 && (
+          <AnnotationOverlayLayer {...overlayLayerProps} />
+        )}
       </div>
+
+      {/* Annotation Island Menu */}
+      {canAnnotate && (
+        <AnnotationIslandMenu {...islandMenuProps} />
+      )}
     </PreviewOverlay>
   )
 }

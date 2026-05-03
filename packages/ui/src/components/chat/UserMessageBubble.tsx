@@ -390,6 +390,12 @@ export function UserMessageBubble({
     }, remaining)
   }, [isQueued])
 
+  // Collect displayCodeFence content from attachments (e.g. DOCX previews)
+  // These are pre-built code fences that the Markdown renderer knows how to display
+  const attachmentCodeFences = attachments
+    ?.filter(att => !!att.displayCodeFence)
+    .map(att => att.displayCodeFence!) ?? []
+
   // Separate edit_request badges (rendered above bubble) from other badges (rendered inline)
   const editRequestBadges = badges?.filter(isEditRequestBadge) ?? []
   const inlineBadges = badges?.filter(b => !isEditRequestBadge(b)) ?? []
@@ -467,6 +473,22 @@ export function UserMessageBubble({
               </div>
             )
           })}
+        </div>
+      )}
+
+      {/* Rich attachment previews (e.g. DOCX inline preview) */}
+      {attachmentCodeFences.length > 0 && (
+        <div className="w-full max-w-[80%] self-end">
+          {attachmentCodeFences.map((fence, i) => (
+            <Markdown
+              key={`att-preview-${i}`}
+              mode="minimal"
+              onUrlClick={onUrlClick}
+              onFileClick={onFileClick}
+            >
+              {fence}
+            </Markdown>
+          ))}
         </div>
       )}
 

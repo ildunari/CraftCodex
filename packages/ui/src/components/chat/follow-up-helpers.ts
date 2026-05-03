@@ -9,7 +9,13 @@ export {
   isAnnotationFollowUpSent,
 } from '../annotations/follow-up-state'
 
+export { getFormatter } from '../annotations/follow-up-formatter-registry'
+export type { FollowUpFormatter } from '../annotations/follow-up-formatter-registry'
+export type { FollowUpContext, SurfaceKind } from '../annotations/types'
+
 export function extractAnnotationSelectedText(annotation: AnnotationV1, messageContent: string): string {
+  // If the annotation has surface-specific document metadata, prefer the quote
+  // selector text (which is the canonical selected text from the surface).
   const quoteSelector = annotation.target.selectors.find(
     (selector): selector is Extract<AnnotationV1['target']['selectors'][number], { type: 'text-quote' }> => selector.type === 'text-quote'
   )

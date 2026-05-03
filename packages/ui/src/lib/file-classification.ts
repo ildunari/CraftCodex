@@ -7,7 +7,7 @@
  */
 
 /** Preview types that map to specific overlay components */
-export type FilePreviewType = 'image' | 'code' | 'markdown' | 'json' | 'text' | 'pdf'
+export type FilePreviewType = 'image' | 'code' | 'markdown' | 'json' | 'text' | 'pdf' | 'docx'
 
 export interface FileClassification {
   /** The preview type, or null if no in-app preview is available */
@@ -64,6 +64,10 @@ const TEXT_EXTENSIONS = new Set([
 /** PDF files — rendered in PDFPreviewOverlay via embedded viewer */
 const PDF_EXTENSIONS = new Set(['pdf'])
 
+/** DOCX files — rendered via docx-preview in an iframe overlay.
+ *  Only .docx (Office Open XML); legacy .doc stays as system-app open. */
+const DOCX_EXTENSIONS = new Set(['docx'])
+
 /**
  * External-only file extensions — recognized as file links but opened externally.
  * These are included in FILE_EXTENSIONS_PATTERN so linkify.ts detects them as file paths,
@@ -107,6 +111,7 @@ export function classifyFile(filePath: string): FileClassification {
   if (CODE_EXTENSIONS.has(ext))     return { type: 'code', canPreview: true }
   if (TEXT_EXTENSIONS.has(ext))     return { type: 'text', canPreview: true }
   if (PDF_EXTENSIONS.has(ext))      return { type: 'pdf', canPreview: true }
+  if (DOCX_EXTENSIONS.has(ext))     return { type: 'docx', canPreview: true }
 
   return { type: null, canPreview: false }
 }
@@ -124,4 +129,5 @@ export const FILE_EXTENSIONS_PATTERN = [
   ...TEXT_EXTENSIONS,
   ...PDF_EXTENSIONS,
   ...EXTERNAL_EXTENSIONS,
+  ...DOCX_EXTENSIONS,
 ].join('|')

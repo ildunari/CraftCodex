@@ -56,6 +56,7 @@ import {
   isAnnotationFollowUpSent,
   extractAnnotationSelectedText,
   normalizeFollowUpText,
+  getFormatter,
   type Turn,
   type AssistantTurn,
   type UserTurn,
@@ -1060,6 +1061,9 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
         if (!note) continue
         if (isAnnotationFollowUpSent(annotation)) continue
 
+        const metaRecord = asRecord(annotation.meta) ?? undefined
+        const docMeta = metaRecord?.document as Record<string, unknown> | undefined
+
         pending.push({
           messageId: message.id,
           annotationId: annotation.id,
@@ -1067,7 +1071,11 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
           selectedText: extractAnnotationSelectedText(annotation, message.content),
           createdAt: annotation.updatedAt ?? annotation.createdAt,
           color: annotation.style?.color,
-          meta: asRecord(annotation.meta) ?? undefined,
+          meta: metaRecord,
+          sourceType: (docMeta?.kind as PendingFollowUpAnnotation['sourceType']) ?? 'markdown',
+          sourceFile: metaRecord?.attachmentId as string | undefined,
+          pageOrSlide: (docMeta?.page as number | undefined) ?? (docMeta?.slide as number | undefined),
+          sectionHeading: (docMeta?.sectionPath as string[] | undefined)?.[0],
         })
       }
     }

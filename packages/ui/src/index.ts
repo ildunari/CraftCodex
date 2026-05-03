@@ -41,6 +41,10 @@ export {
   isAnnotationFollowUpSent,
   extractAnnotationSelectedText,
   normalizeFollowUpText,
+  getFormatter,
+  type FollowUpFormatter,
+  type FollowUpContext,
+  type SurfaceKind,
   // Inline execution for EditPopover
   InlineExecution,
   mapToolEventToActivity,
