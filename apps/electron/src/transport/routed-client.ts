@@ -230,6 +230,9 @@ export class RoutedClient implements RpcClient {
     // stale recovery logic to refresh sessions that changed while no client
     // was watching this workspace.
     if (newClient !== this.localClient) {
+      // `let` + optional-chaining: onConnectionStateChanged can fire its
+      // callback synchronously when the new client is already connected, which
+      // would put `unsub` in the TDZ if declared `const`.
       let unsub: (() => void) | undefined
       unsub = newClient.onConnectionStateChanged((state) => {
         if (state.status === 'connected') {

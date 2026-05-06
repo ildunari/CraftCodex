@@ -2,6 +2,7 @@ import * as React from 'react'
 import { Command as CommandPrimitive } from 'cmdk'
 import { toast } from 'sonner'
 import { AnimatePresence, motion } from 'motion/react'
+import { useTranslation } from 'react-i18next'
 import {
   Paperclip,
   ArrowUp,
@@ -43,8 +44,16 @@ import { cn } from '@/lib/utils'
 import { isMac, PATH_SEP, getPathBasename } from '@/lib/platform'
 import { applySmartTypography } from '@/lib/smart-typography'
 import { AttachmentPreview } from '../AttachmentPreview'
-import { getModelContextWindow } from '@config/models'
-import { resolveEffectiveConnectionSlug, getConnectionModelContextWindow } from '@config/llm-connections'
+import { ImageSupportWarningBanner } from './ImageSupportWarningBanner'
+import { getModelContextWindow, getModelDisplayName } from '@config/models'
+import {
+  resolveEffectiveConnectionSlug,
+  getConnectionModelContextWindow,
+  isCompatProvider,
+  modelSupportsImages,
+  setModelSupportsImages,
+  type LlmConnection,
+} from '@config/llm-connections'
 import { useOptionalAppShellContext } from '@/context/AppShellContext'
 import { EditPopover, getEditConfig } from '@/components/ui/EditPopover'
 import { SourceAvatar } from '@/components/ui/source-avatar'
@@ -274,6 +283,7 @@ export function FreeFormInput({
   backendCapabilities,
   nativeCapabilityManifest,
 }: FreeFormInputProps) {
+  const { t } = useTranslation()
   // Read connection default model, connections, and workspace info from context.
   // Uses optional variant so playground (no provider) doesn't crash.
   const appShellCtx = useOptionalAppShellContext()
@@ -292,6 +302,13 @@ export function FreeFormInput({
   )
   const hasNoAvailableModels = !!effectiveConnectionDetails && getModelEntriesForConnection(effectiveConnectionDetails).length === 0
   const sendBlocked = disabled || disableSend || connectionUnavailable || hasNoAvailableModels
+  const currentModelDisplayName = React.useMemo(() => {
+    const model = getModelEntriesForConnection(effectiveConnectionDetails).find(m =>
+      typeof m === 'string' ? m === currentModel : m.id === currentModel
+    )
+    if (!model) return getModelDisplayName(currentModel)
+    return typeof model === 'string' ? getModelDisplayName(model) : (model.name ?? getModelDisplayName(model.id))
+  }, [effectiveConnectionDetails, currentModel])
 
   // Access sessionStatuses and onSessionStatusChange from context for the # menu state picker
   const sessionStatuses = appShellCtx?.sessionStatuses ?? []
@@ -478,6 +495,33 @@ export function FreeFormInput({
     onInputChange?.('')
     prevInputValueRef.current = ''
   }, [onInputChange])
+
+  const refreshLlmConnections = appShellCtx?.refreshLlmConnections
+  const handleToggleModelVision = React.useCallback(async (
+    connectionSlug: string,
+    modelId: string,
+    enabled: boolean,
+  ) => {
+    if (!window.electronAPI) return
+    const conn = llmConnections.find(c => c.slug === connectionSlug)
+    if (!conn) return
+    try {
+      // Strip the runtime-only status fields before passing to setModelSupportsImages,
+      // so the persisted payload matches the LlmConnection schema.
+      const { isAuthenticated: _a, authError: _b, isDefault: _c, ...bare } = conn
+      const updated = setModelSupportsImages(bare as LlmConnection, modelId, enabled)
+      const result = await window.electronAPI.saveLlmConnection(updated)
+      if (!result.success) {
+        console.error('Failed to toggle model vision:', result.error)
+        toast.error(t('chat.modelPicker.toggleVisionFailed'))
+        return
+      }
+      await refreshLlmConnections?.()
+    } catch (error) {
+      console.error('Failed to toggle model vision:', error)
+      toast.error(t('chat.modelPicker.toggleVisionFailed'))
+    }
+  }, [llmConnections, refreshLlmConnections, t])
 
   const consumeInputDraftSnapshot = React.useCallback((): string => {
     const snapshot = input.trim()
@@ -1352,6 +1396,17 @@ export function FreeFormInput({
 
   const hasContent = input.trim() || attachments.length > 0 || followUpItems.length > 0
 
+  // Pre-flight image-support check: warn when staged images would be silently
+  // stripped by Pi SDK because the active custom-endpoint model is text-only.
+  // Gate on pi_compat — built-in catalogs (anthropic/pi) are owned by the SDK
+  // and we can't repair them from the UI here.
+  const hasStagedImages = attachments.some(a => a.type === 'image' || a.mimeType?.startsWith('image/'))
+  const showVisionWarning =
+    hasStagedImages
+    && !!effectiveConnectionDetails
+    && isCompatProvider(effectiveConnectionDetails.providerType)
+    && !modelSupportsImages(effectiveConnectionDetails, currentModel)
+
   return (
     <form onSubmit={handleSubmit}>
       <div
@@ -1426,6 +1481,16 @@ export function FreeFormInput({
             } : undefined}
             side="top"
             align="start"
+          />
+        )}
+
+        {/* Pre-flight image-support warning — only for pi_compat connections
+            where the renderer can both detect text-only models and offer to
+            flip the per-model supportsImages override on the spot. */}
+        {showVisionWarning && effectiveConnectionDetails && (
+          <ImageSupportWarningBanner
+            modelName={currentModelDisplayName}
+            onEnable={() => handleToggleModelVision(effectiveConnectionDetails.slug, currentModel, true)}
           />
         )}
 
@@ -1732,6 +1797,7 @@ export function FreeFormInput({
               contextStatus={contextStatus}
               backendCapabilities={backendCapabilities}
               nativeCapabilityManifest={nativeCapabilityManifest}
+              onToggleModelVision={handleToggleModelVision}
             />
           )}
 

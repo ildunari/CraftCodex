@@ -16,7 +16,8 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { HeaderMenu } from '@/components/ui/HeaderMenu'
 import { routes } from '@/lib/navigate'
-import { X, MoreHorizontal, Pencil, Trash2, Star, ChevronDown, ChevronRight, CheckCircle2, AlertTriangle, RefreshCcw, Settings2, ExternalLink, KeyRound } from 'lucide-react'
+import { X, MoreHorizontal, Pencil, Trash2, Star, ChevronDown, ChevronRight, CheckCircle2, AlertTriangle, RefreshCcw, Settings2, ExternalLink, KeyRound, MessageSquareMore, Zap, Clock, Check } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import type { CredentialHealthStatus, CredentialHealthIssue } from '../../../shared/types'
 import { Spinner, FullscreenOverlayBase } from '@craft-agent/ui'
 import { useSetAtom } from 'jotai'
@@ -33,6 +34,9 @@ import {
   StyledDropdownMenuContent,
   StyledDropdownMenuItem,
   StyledDropdownMenuSeparator,
+  DropdownMenuSub,
+  StyledDropdownMenuSubTrigger,
+  StyledDropdownMenuSubContent,
 } from '@/components/ui/styled-dropdown'
 import { cn } from '@/lib/utils'
 import { ConnectionIcon } from '@/components/icons/ConnectionIcon'
@@ -53,7 +57,7 @@ import { OnboardingWizard, type ApiSetupMethod } from '@/components/onboarding'
 import { RenameDialog } from '@/components/ui/rename-dialog'
 import { useAppShellContext } from '@/context/AppShellContext'
 import { getModelShortName, type ModelDefinition } from '@config/models'
-import { type CustomEndpointApi } from '@config/llm-connections'
+import { resolveMidStreamBehavior, type CustomEndpointApi, type MidStreamBehavior } from '@config/llm-connections'
 import { toast } from 'sonner'
 
 const THINKING_LEVEL_COPY: Record<ThinkingLevel, { name: string; description: string }> = {
@@ -162,11 +166,13 @@ interface ConnectionRowProps {
   onValidate: () => void
   onReauthenticate: () => void
   onEdit: () => void
+  onSetMidStreamBehavior: (behavior: MidStreamBehavior) => void
   validationState: ValidationState
   validationError?: string
 }
 
-function ConnectionRow({ connection, isLastConnection, onRenameClick, onDelete, onSetDefault, onValidate, onReauthenticate, onEdit, validationState, validationError }: ConnectionRowProps) {
+function ConnectionRow({ connection, isLastConnection, onRenameClick, onDelete, onSetDefault, onValidate, onReauthenticate, onEdit, onSetMidStreamBehavior, validationState, validationError }: ConnectionRowProps) {
+  const { t } = useTranslation()
   const [menuOpen, setMenuOpen] = useState(false)
   const [piBaseUrl, setPiBaseUrl] = useState<string | undefined>(undefined)
 
@@ -298,6 +304,29 @@ function ConnectionRow({ connection, isLastConnection, onRenameClick, onDelete, 
             <CheckCircle2 className="h-3.5 w-3.5" />
             <span>Validate Connection</span>
           </StyledDropdownMenuItem>
+          {(() => {
+            const currentBehavior = resolveMidStreamBehavior(connection)
+            return (
+              <DropdownMenuSub>
+                <StyledDropdownMenuSubTrigger>
+                  <MessageSquareMore className="h-3.5 w-3.5" />
+                  <span>{t("settings.ai.midStream.title")}</span>
+                </StyledDropdownMenuSubTrigger>
+                <StyledDropdownMenuSubContent>
+                  <StyledDropdownMenuItem onClick={() => onSetMidStreamBehavior('steer')}>
+                    <Zap className="h-3.5 w-3.5" />
+                    <span className="flex-1">{t("settings.ai.midStream.steer")}</span>
+                    {currentBehavior === 'steer' && <Check className="h-3.5 w-3.5" />}
+                  </StyledDropdownMenuItem>
+                  <StyledDropdownMenuItem onClick={() => onSetMidStreamBehavior('queue')}>
+                    <Clock className="h-3.5 w-3.5" />
+                    <span className="flex-1">{t("settings.ai.midStream.queue")}</span>
+                    {currentBehavior === 'queue' && <Check className="h-3.5 w-3.5" />}
+                  </StyledDropdownMenuItem>
+                </StyledDropdownMenuSubContent>
+              </DropdownMenuSub>
+            )
+          })()}
           <StyledDropdownMenuSeparator />
           <StyledDropdownMenuItem
             onClick={onDelete}
@@ -597,6 +626,7 @@ function AgentCatalogRow({ agent, onEnable, onSetup, onApiKeySetup, onRecheck, b
 // ============================================
 
 export default function AiSettingsPage() {
+  const { t } = useTranslation()
   const {
     llmConnections,
     refreshLlmConnections,
@@ -892,6 +922,30 @@ export default function AiSettingsPage() {
     }
   }, [refreshLlmConnections])
 
+  // Update a connection's mid-stream send behavior (steer vs queue).
+  // Uses the same saveLlmConnection RPC as other connection edits.
+  const handleSetMidStreamBehavior = useCallback(async (
+    connection: LlmConnectionWithStatus,
+    behavior: MidStreamBehavior,
+  ) => {
+    if (!window.electronAPI) return
+    if (resolveMidStreamBehavior(connection) === behavior) return
+    try {
+      const updated = { ...connection, midStreamBehavior: behavior }
+      const { isAuthenticated: _a, authError: _b, isDefault: _c, ...connectionData } = updated
+      const result = await window.electronAPI.saveLlmConnection(connectionData as import('../../../shared/types').LlmConnection)
+      if (result.success) {
+        refreshLlmConnections?.()
+      } else {
+        console.error('Failed to update mid-stream behavior:', result.error)
+        toast.error(t('settings.ai.midStream.updateFailed'))
+      }
+    } catch (error) {
+      console.error('Failed to update mid-stream behavior:', error)
+      toast.error(t('settings.ai.midStream.updateFailed'))
+    }
+  }, [refreshLlmConnections, t])
+
   // Get the default connection for display
   const defaultConnection = useMemo(() => {
     return llmConnections.find(c => c.isDefault && isConnectionReady(c))
@@ -1171,6 +1225,7 @@ export default function AiSettingsPage() {
                         onValidate={() => handleValidateConnection(conn.slug)}
                         onReauthenticate={() => handleReauthenticateConnection(conn)}
                         onEdit={() => handleEditConnection(conn)}
+                        onSetMidStreamBehavior={(behavior) => handleSetMidStreamBehavior(conn, behavior)}
                         validationState={validationStates[conn.slug]?.state || 'idle'}
                         validationError={validationStates[conn.slug]?.error}
                       />

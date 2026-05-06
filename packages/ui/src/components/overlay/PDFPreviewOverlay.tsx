@@ -16,6 +16,7 @@ import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Document, Page, pdfjs } from 'react-pdf'
 import type { PDFDocumentProxy } from 'pdfjs-dist/types/src/display/api'
+import type { DocumentCallback } from 'react-pdf/dist/shared/types.js'
 import { FileText } from 'lucide-react'
 import type { AnnotationV1 } from '@craft-agent/core'
 import { PreviewOverlay } from './PreviewOverlay'
@@ -101,7 +102,7 @@ export function PDFPreviewOverlay({
 
   // Refs for annotation system
   const pdfContentRef = useRef<HTMLDivElement>(null)
-  const pdfDocRef = useRef<PDFDocumentProxy | null>(null)
+  const pdfDocRef = useRef<DocumentCallback | null>(null)
   const surfaceRef = useRef<PdfAnnotationSurface | null>(null)
 
   // ---------------------------------------------------------------------------
@@ -117,7 +118,7 @@ export function PDFPreviewOverlay({
     }
     // Re-create if container changed or doc changed
     if (!surfaceRef.current) {
-      const getPage = (pageNumber: number) => doc.getPage(pageNumber)
+      const getPage = (pageNumber: number) => doc.getPage(pageNumber) as unknown as ReturnType<PDFDocumentProxy['getPage']>
       const fileName = activeItem?.label || activeItem?.src?.split('/').pop()
       surfaceRef.current = new PdfAnnotationSurface(container, getPage, fileName)
     }
@@ -279,7 +280,7 @@ export function PDFPreviewOverlay({
     return () => { cancelled = true }
   }, [isOpen, activeItem?.src, loadPdfData])
 
-  const onDocumentLoadSuccess = useCallback((pdf: { numPages: number } & PDFDocumentProxy) => {
+  const onDocumentLoadSuccess = useCallback((pdf: DocumentCallback) => {
     setNumPages(pdf.numPages)
     pdfDocRef.current = pdf
     surfaceRef.current = null // Reset surface so it picks up new doc

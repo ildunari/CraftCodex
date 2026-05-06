@@ -2592,6 +2592,8 @@ export function updateLlmConnection(slug: string, updates: Partial<Omit<LlmConne
     codexArgs: updates.codexArgs !== undefined ? updates.codexArgs : existing.codexArgs,
     // Command-backed native capability inheritance policy
     nativeCapabilityPolicy: updates.nativeCapabilityPolicy !== undefined ? updates.nativeCapabilityPolicy : existing.nativeCapabilityPolicy,
+    // Mid-stream send behavior (steer vs queue) — read via resolveMidStreamBehavior()
+    midStreamBehavior: updates.midStreamBehavior !== undefined ? updates.midStreamBehavior : existing.midStreamBehavior,
     // Timestamps
     lastUsedAt: updates.lastUsedAt !== undefined ? updates.lastUsedAt : existing.lastUsedAt,
   };

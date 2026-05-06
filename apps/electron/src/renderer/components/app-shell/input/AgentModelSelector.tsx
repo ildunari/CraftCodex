@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { AlertCircle, Check, ChevronDown } from 'lucide-react'
+import { AlertCircle, Check, ChevronDown, Image as ImageIcon } from 'lucide-react'
 
 import * as storage from '@/lib/local-storage'
 import { Button } from '@/components/ui/button'
@@ -19,7 +19,7 @@ import {
 import { cn } from '@/lib/utils'
 import { ConnectionIcon } from '@/components/icons/ConnectionIcon'
 import { getModelDisplayName } from '@config/models'
-import { resolveEffectiveConnectionSlug, isCompatProvider } from '@config/llm-connections'
+import { resolveEffectiveConnectionSlug, isCompatProvider, modelSupportsImages } from '@config/llm-connections'
 import { type ThinkingLevel, THINKING_LEVELS } from '@craft-agent/shared/agent/thinking-levels'
 import type { AgentBackendCapabilities, LlmConnectionWithStatus, NativeCapabilitySyncManifest } from '../../../../shared/types'
 import {
@@ -76,6 +76,7 @@ interface AgentModelSelectorProps {
   }
   backendCapabilities?: AgentBackendCapabilities
   nativeCapabilityManifest?: NativeCapabilitySyncManifest
+  onToggleModelVision?: (connectionSlug: string, modelId: string, enabled: boolean) => void
 }
 
 function capabilitySummary(capabilities: AgentBackendCapabilities | undefined): string | null {
@@ -117,6 +118,7 @@ export function AgentModelSelector({
   contextStatus,
   backendCapabilities,
   nativeCapabilityManifest,
+  onToggleModelVision,
 }: AgentModelSelectorProps) {
   const [open, setOpen] = React.useState(false)
   const triggerLabel = connectionUnavailable
@@ -185,6 +187,8 @@ export function AgentModelSelector({
       const modelName = stripPiPrefixForDisplay(getModelName(model))
       const description = getModelDescription(model)
       const isSelectedModel = isCurrentConnection && currentModel === modelId
+      const showVisionToggle = isCompatProvider(conn.providerType)
+      const visionOn = showVisionToggle && modelSupportsImages(conn, modelId)
       return (
         <StyledDropdownMenuItem
           key={modelId}
@@ -202,9 +206,38 @@ export function AgentModelSelector({
               <div className="text-xs text-muted-foreground truncate">{description}</div>
             )}
           </div>
-          {isSelectedModel && (
-            <Check className="h-3 w-3 text-foreground shrink-0 ml-3" />
-          )}
+          <div className="flex items-center gap-1 ml-3 shrink-0">
+            {showVisionToggle && onToggleModelVision && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    aria-label={visionOn ? 'Image support enabled' : 'Image support disabled'}
+                    className="inline-flex items-center justify-center p-1 rounded hover:bg-foreground/5 cursor-pointer"
+                    onClick={(event) => {
+                      event.preventDefault()
+                      event.stopPropagation()
+                      onToggleModelVision(conn.slug, modelId, !visionOn)
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault()
+                        event.stopPropagation()
+                        onToggleModelVision(conn.slug, modelId, !visionOn)
+                      }
+                    }}
+                  >
+                    <ImageIcon className={cn('h-3.5 w-3.5', visionOn ? 'text-foreground/70' : 'text-foreground/30')} />
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent>{visionOn ? 'Image support enabled' : 'Image support disabled'}</TooltipContent>
+              </Tooltip>
+            )}
+            {isSelectedModel && (
+              <Check className="h-3 w-3 text-foreground shrink-0" />
+            )}
+          </div>
         </StyledDropdownMenuItem>
       )
     })
@@ -306,7 +339,36 @@ export function AgentModelSelector({
               <div className="font-medium text-sm truncate">{stripPiPrefixForDisplay(connectionDefaultModel)}</div>
               <div className="text-xs text-muted-foreground">Agent default</div>
             </div>
-            <Check className="h-3 w-3 text-foreground shrink-0 ml-3" />
+            <div className="flex items-center gap-1 ml-3 shrink-0">
+              {effectiveConnectionDetails && isCompatProvider(effectiveConnectionDetails.providerType) && onToggleModelVision && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      aria-label={modelSupportsImages(effectiveConnectionDetails, connectionDefaultModel) ? 'Image support enabled' : 'Image support disabled'}
+                      className="inline-flex items-center justify-center p-1 rounded pointer-events-auto opacity-100 hover:bg-foreground/5 cursor-pointer"
+                      onClick={(event) => {
+                        event.preventDefault()
+                        event.stopPropagation()
+                        onToggleModelVision(effectiveConnectionDetails.slug, connectionDefaultModel, !modelSupportsImages(effectiveConnectionDetails, connectionDefaultModel))
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault()
+                          event.stopPropagation()
+                          onToggleModelVision(effectiveConnectionDetails.slug, connectionDefaultModel, !modelSupportsImages(effectiveConnectionDetails, connectionDefaultModel))
+                        }
+                      }}
+                    >
+                      <ImageIcon className={cn('h-3.5 w-3.5', modelSupportsImages(effectiveConnectionDetails, connectionDefaultModel) ? 'text-foreground/70' : 'text-foreground/30')} />
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent>{modelSupportsImages(effectiveConnectionDetails, connectionDefaultModel) ? 'Image support enabled' : 'Image support disabled'}</TooltipContent>
+                </Tooltip>
+              )}
+              <Check className="h-3 w-3 text-foreground shrink-0" />
+            </div>
           </StyledDropdownMenuItem>
         ) : (
           <>
@@ -329,6 +391,9 @@ export function AgentModelSelector({
               const modelName = stripPiPrefixForDisplay(getModelName(model))
               const isSelected = currentModel === modelId
               const description = getModelDescription(model)
+              const showVisionToggle =
+                !!effectiveConnectionDetails && isCompatProvider(effectiveConnectionDetails.providerType)
+              const visionOn = showVisionToggle && modelSupportsImages(effectiveConnectionDetails!, modelId)
               return (
                 <StyledDropdownMenuItem
                   key={modelId}
@@ -341,9 +406,38 @@ export function AgentModelSelector({
                       <div className="text-xs text-muted-foreground truncate">{description}</div>
                     )}
                   </div>
-                  {isSelected && (
-                    <Check className="h-3 w-3 text-foreground shrink-0 ml-3" />
-                  )}
+                  <div className="flex items-center gap-1 ml-3 shrink-0">
+                    {showVisionToggle && effectiveConnectionDetails && onToggleModelVision && (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span
+                            role="button"
+                            tabIndex={0}
+                            aria-label={visionOn ? 'Image support enabled' : 'Image support disabled'}
+                            className="inline-flex items-center justify-center p-1 rounded hover:bg-foreground/5 cursor-pointer"
+                            onClick={(event) => {
+                              event.preventDefault()
+                              event.stopPropagation()
+                              onToggleModelVision(effectiveConnectionDetails.slug, modelId, !visionOn)
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter' || event.key === ' ') {
+                                event.preventDefault()
+                                event.stopPropagation()
+                                onToggleModelVision(effectiveConnectionDetails.slug, modelId, !visionOn)
+                              }
+                            }}
+                          >
+                            <ImageIcon className={cn('h-3.5 w-3.5', visionOn ? 'text-foreground/70' : 'text-foreground/30')} />
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent>{visionOn ? 'Image support enabled' : 'Image support disabled'}</TooltipContent>
+                      </Tooltip>
+                    )}
+                    {isSelected && (
+                      <Check className="h-3 w-3 text-foreground shrink-0" />
+                    )}
+                  </div>
                 </StyledDropdownMenuItem>
               )
             })}

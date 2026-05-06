@@ -354,7 +354,7 @@ describe('connection-scoped model metadata', () => {
   })
 
   it('falls back to registry metadata for built-in Claude models', () => {
-    expect(getConnectionModelContextWindow({ models: [] }, 'claude-opus-4-6')).toBe(1_000_000)
+    expect(getConnectionModelContextWindow({ models: [] }, 'claude-opus-4-6')).toBe(200_000)
     expect(getConnectionModelSupportsThinking({ models: [] }, 'claude-opus-4-6')).toBeUndefined()
   })
 })
