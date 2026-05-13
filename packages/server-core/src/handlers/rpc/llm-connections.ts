@@ -8,7 +8,7 @@ import {
   validateStoredBackendConnection,
 } from '@craft-agent/shared/agent/backend'
 import { getModelRefreshService } from '@craft-agent/server-core/model-fetchers'
-import { parseTestConnectionError, createBuiltInConnection, validateModelList, piAuthProviderDisplayName, validateSetupTestInput, setupTestRequiresApiKey, droidShadowWarning, isLegacyDroidBridge, loadFactoryDroidModelConfig, mergeDroidModels, normalizeAgentReadinessError, selectPreferredCommand, type CommandCandidate } from '@craft-agent/server-core/domain'
+import { parseTestConnectionError, createBuiltInConnection, validateModelList, piAuthProviderDisplayName, validateSetupTestInput, setupTestRequiresApiKey, droidShadowWarning, isLegacyDroidBridge, loadFactoryDroidModelConfig, mergeDroidModels, normalizeAgentReadinessError, resolveCustomEndpointSetup, selectPreferredCommand, type CommandCandidate } from '@craft-agent/server-core/domain'
 import { getWorkspaceOrThrow, buildBackendHostRuntimeContext } from '@craft-agent/server-core/handlers'
 import { pushTyped, type RpcServer } from '@craft-agent/server-core/transport'
 import type { HandlerDeps } from '../handler-deps'
@@ -551,9 +551,19 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
         updates.customEndpoint = customEndpoint
         // Route custom OpenAI/Anthropic-compatible endpoints through PiAgent.
         updates.providerType = 'pi_compat'
-        updates.authType = 'api_key_with_endpoint'
-        // Keep provider hint in lockstep with selected protocol toggle.
-        updates.piAuthProvider = customEndpoint.api === 'anthropic-messages' ? 'anthropic' : 'openai'
+        const branch = resolveCustomEndpointSetup({
+          baseUrl: setup.baseUrl ?? undefined,
+          credential: setup.credential ?? undefined,
+          customEndpointApi: customEndpoint.api,
+        })
+        updates.authType = branch.authType
+        if (branch.name !== undefined) updates.name = branch.name
+        if (branch.piAuthProvider !== undefined) updates.piAuthProvider = branch.piAuthProvider
+
+        // Brand-name override on first setup only (user-renamed connections aren't clobbered on re-save).
+        if (isNewConnection && !updates.name && setup.baseUrl?.toLowerCase().includes('manifest.build')) {
+          updates.name = 'Manifest'
+        }
       } else if (setup.baseUrl !== undefined) {
         // Base URL was explicitly updated without custom protocol config.
         // Treat this as non-custom mode and clear stale custom endpoint metadata.

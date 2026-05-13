@@ -58,6 +58,7 @@ import { useOptionalAppShellContext } from '@/context/AppShellContext'
 import { EditPopover, getEditConfig } from '@/components/ui/EditPopover'
 import { SourceAvatar } from '@/components/ui/source-avatar'
 import { SourceSelectorPopover } from '@/components/ui/SourceSelectorPopover'
+import { CompactSourceSelector } from '@/components/ui/CompactSourceSelector'
 import { FreeFormInputContextBadge } from './FreeFormInputContextBadge'
 import type { AgentBackendCapabilities, FileAttachment, LoadedSource, LoadedSkill, NativeCapabilitySyncManifest } from '../../../../shared/types'
 import type { PermissionMode } from '@craft-agent/shared/agent/modes'
@@ -69,6 +70,7 @@ import { buildPlanApprovalMessage } from '../plan-approval-message'
 import { shouldHandleScopedInputEvent } from './input-event-guards'
 import { clearPendingFocusForSession, consumePendingFocusForSession } from './focus-input-events'
 import { executePluginInvokeResult, usePluginComposerActions } from '@/components/plugins'
+import { CompactPermissionModeSelector } from './CompactPermissionModeSelector'
 import {
   getRecentWorkingDirs,
   addRecentWorkingDir,
@@ -1625,10 +1627,6 @@ export function FreeFormInput({
           />
 
           <div className={cn("flex items-center gap-1 px-2 py-2", !compactMode && "border-t border-border/50")}>
-          {/* Left side: Context badges - shrinkable so model + send always stay visible */}
-          {/* Hidden in compact mode (EditPopover embedding) */}
-          {!compactMode && (
-          <div className="flex items-center gap-1 min-w-32 shrink overflow-hidden">
           {/* Hidden file input for attach button */}
           <input
             ref={fileInputRef}
@@ -1637,6 +1635,115 @@ export function FreeFormInput({
             className="hidden"
             onChange={handleFileInputChange}
           />
+
+          {/* Compact mode: permission mode drawer + standard icon badges for attach/sources/working dir */}
+          {compactMode && (
+          <>
+          {onPermissionModeChange && (
+            <CompactPermissionModeSelector
+              permissionMode={permissionMode}
+              onPermissionModeChange={onPermissionModeChange}
+            />
+          )}
+          <FreeFormInputContextBadge
+            icon={<Paperclip className="h-4 w-4" />}
+            label={attachments.length > 0
+              ? t("chat.filesCount", { count: attachments.length })
+              : t("chat.attach")
+            }
+            isExpanded={false}
+            hasSelection={attachments.length > 0}
+            showChevron={false}
+            onClick={handleAttachClick}
+            tooltip={t("chat.attachFilesTooltip")}
+            disabled={disabled}
+          />
+          {onSourcesChange && (
+            <div className="relative shrink min-w-0">
+              <FreeFormInputContextBadge
+                buttonRef={sourceButtonRef}
+                icon={
+                  optimisticSourceSlugs.length === 0 ? (
+                    <DatabaseZap className="h-4 w-4" />
+                  ) : (
+                    <div className="flex items-center -ml-0.5">
+                      {(() => {
+                        const enabledSources = sources.filter(s => optimisticSourceSlugs.includes(s.config.slug))
+                        const displaySources = enabledSources.slice(0, 3)
+                        const remainingCount = enabledSources.length - 3
+                        return (
+                          <>
+                            {displaySources.map((source, index) => (
+                              <div
+                                key={source.config.slug}
+                                className={cn("relative h-5 w-5 rounded-[4px] bg-background shadow-minimal flex items-center justify-center", index > 0 && "-ml-1")}
+                                style={{ zIndex: index + 1 }}
+                              >
+                                <SourceAvatar source={source} size="xs" />
+                              </div>
+                            ))}
+                            {remainingCount > 0 && (
+                              <div
+                                className="-ml-1 h-5 w-5 rounded-[4px] bg-background shadow-minimal flex items-center justify-center text-[8px] font-medium text-muted-foreground"
+                                style={{ zIndex: displaySources.length + 1 }}
+                              >
+                                +{remainingCount}
+                              </div>
+                            )}
+                          </>
+                        )
+                      })()}
+                    </div>
+                  )
+                }
+                label={
+                  optimisticSourceSlugs.length === 0
+                    ? t("chat.sourcesTooltip")
+                    : (() => {
+                        const enabledSources = sources.filter(s => optimisticSourceSlugs.includes(s.config.slug))
+                        if (enabledSources.length === 1) return enabledSources[0].config.name
+                        return t("chat.sourcesCount", { count: enabledSources.length })
+                      })()
+                }
+                isExpanded={false}
+                hasSelection={optimisticSourceSlugs.length > 0}
+                showChevron={false}
+                isOpen={sourceDropdownOpen}
+                disabled={disabled}
+                onClick={() => setSourceDropdownOpen(prev => !prev)}
+                tooltip={t("chat.sourcesTooltip")}
+              />
+              <CompactSourceSelector
+                open={sourceDropdownOpen}
+                onOpenChange={setSourceDropdownOpen}
+                sources={sources}
+                selectedSlugs={optimisticSourceSlugs}
+                onToggleSlug={(slug) => {
+                  const isEnabled = optimisticSourceSlugs.includes(slug)
+                  const newSlugs = isEnabled
+                    ? optimisticSourceSlugs.filter(currentSlug => currentSlug !== slug)
+                    : [...optimisticSourceSlugs, slug]
+                  setOptimisticSourceSlugs(newSlugs)
+                  onSourcesChange?.(newSlugs)
+                }}
+              />
+            </div>
+          )}
+          {onWorkingDirectoryChange && (
+            <WorkingDirectoryBadge
+              workingDirectory={workingDirectory}
+              onWorkingDirectoryChange={onWorkingDirectoryChange}
+              sessionFolderPath={sessionFolderPath}
+              isEmptySession={false}
+              workspaceId={workspaceId}
+            />
+          )}
+          </>
+          )}
+
+          {/* Desktop: full badges row with labels and working directory */}
+          {!compactMode && (
+          <div className="flex items-center gap-1 min-w-32 shrink overflow-hidden">
           {/* 1. Attach Files Badge */}
           <FreeFormInputContextBadge
             icon={<Paperclip className="h-4 w-4" />}
@@ -2093,6 +2200,7 @@ function WorkingDirectoryBadge({
                   <button
                     type="button"
                     onClick={(e) => handleRemoveRecent(e, path)}
+                    data-touch-reveal="true"
                     className="shrink-0 h-3 w-3 rounded-[3px] flex items-center justify-center opacity-0 group-hover/item:opacity-100 text-muted-foreground hover:text-foreground hover:bg-foreground/10 transition-all"
                   >
                     <X className="h-3 w-3" />

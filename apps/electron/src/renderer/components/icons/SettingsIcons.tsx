@@ -1,14 +1,12 @@
 /**
  * Settings Icons
  *
- * Custom SVG icons for settings pages. Used by both:
+ * Shared Lucide icon mapping for settings pages. Used by both:
  * - AppMenu (logo dropdown settings submenu)
  * - SettingsNavigator (settings sidebar panel)
- *
- * These are more detailed than Lucide icons and provide visual consistency
- * across the settings UI.
  */
 
+import type * as React from 'react'
 import type { SettingsSubpage } from '../../../shared/types'
 
 type IconProps = { className?: string }

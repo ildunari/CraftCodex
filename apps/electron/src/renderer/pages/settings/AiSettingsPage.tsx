@@ -220,7 +220,11 @@ function ConnectionRow({ connection, isLastConnection, onRenameClick, onDelete, 
         parts.push(piLabel ?? 'Craft Agents Backend')
         break
       }
-      case 'pi_compat': parts.push('Craft Agents Backend Compatible'); break
+      case 'pi_compat':
+        parts.push(connection.baseUrl?.toLowerCase().includes('manifest.build')
+          ? 'Manifest'
+          : 'Craft Agents Backend Compatible')
+        break
       default: parts.push(provider ? getProviderDisplayName(provider, connection.baseUrl) : 'Unknown')
     }
 

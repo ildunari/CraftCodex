@@ -113,7 +113,7 @@ export function extractAcpText(value: unknown): string[] {
   const visit = (node: unknown, keyHint?: string): void => {
     if (node == null) return;
     if (typeof node === 'string') {
-      if (keyHint && /^(text|delta|content|message|output|summary)$/i.test(keyHint)) {
+      if (keyHint && /^(text|delta|content|message|output)$/i.test(keyHint)) {
         texts.push(node);
       }
       return;
