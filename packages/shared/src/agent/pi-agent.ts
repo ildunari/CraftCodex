@@ -27,6 +27,7 @@ import type {
 } from './backend/types.ts';
 import { AbortReason } from './backend/types.ts';
 import { getBackendRuntime } from './backend/internal/driver-types.ts';
+import { SourceActivationDrainController } from './source-activation-drain.ts';
 
 import type { PermissionMode } from './mode-manager.ts';
 import type { ThinkingLevel } from './thinking-levels.ts';
@@ -49,7 +50,7 @@ import { getCoAuthorPreference } from '../config/preferences.ts';
 // Credential manager for token storage
 import { getCredentialManager } from '../credentials/manager.ts';
 
-// ChatGPT OAuth token refresh (shared with CodexAgent)
+// ChatGPT OAuth token refresh (used when Pi routes ChatGPT auth)
 import { refreshChatGptTokens } from '../auth/chatgpt-oauth.ts';
 
 // Session-scoped tool callbacks (for SubmitPlan, source auth, etc.)
@@ -91,6 +92,9 @@ import { parseError, type AgentError } from './errors.ts';
 
 // Centralized PreToolUse pipeline
 import { runPreToolUseChecks, type PreToolUseCheckResult } from './core/pre-tool-use.ts';
+import { getRtkPath } from './core/rtk-detector.ts';
+import { getRtkEnabled } from '../config/storage.ts';
+import type { RtkContext } from './core/rtk-rewrite.ts';
 
 // Workspace slug extraction for skill qualification
 import { extractWorkspaceSlug } from '../utils/workspace.ts';
@@ -144,7 +148,7 @@ export class PiAgent extends BaseAgent {
   // Event adapter
   private adapter: PiEventAdapter;
 
-  // Event queue for streaming (AsyncGenerator pattern -- shared with CodexAgent/CopilotAgent)
+  // Event queue for streaming (AsyncGenerator pattern over subprocess JSONL)
   private eventQueue = new EventQueue();
 
   // Error deduplication — suppress identical consecutive errors after a threshold
@@ -1146,6 +1150,12 @@ export class PiAgent extends BaseAgent {
       ? getSessionDataPath(rootPath, sessionId)
       : undefined;
 
+    // Build RTK context fresh per call so toggling the preference takes
+    // effect without restart. `getRtkPath()` is cached per process.
+    const rtkContext: RtkContext | undefined = getRtkEnabled()
+      ? { enabled: true, path: getRtkPath(), exclude: [] }
+      : undefined;
+
     const checkResult = runPreToolUseChecks({
       toolName,
       input,
@@ -1161,6 +1171,7 @@ export class PiAgent extends BaseAgent {
       hasSourceActivation: !!this.onSourceActivationRequest,
       permissionManager: this.permissionManager,
       prerequisiteManager: this.prerequisiteManager,
+      rtkContext,
       onDebug: (msg) => this.debug(`PreToolUse(sessionId=${sessionId}): ${msg}`),
     });
 
@@ -1233,6 +1244,7 @@ export class PiAgent extends BaseAgent {
           hasSourceActivation: !!this.onSourceActivationRequest,
           permissionManager: this.permissionManager,
           prerequisiteManager: this.prerequisiteManager,
+          rtkContext,
           onDebug: (msg) => this.debug(`PreToolUse(sessionId=${sessionId}): ${msg}`),
         });
 
@@ -1856,7 +1868,7 @@ export class PiAgent extends BaseAgent {
   }
 
   // ============================================================
-  // Chat (AsyncGenerator with event queue -- mirrors CopilotAgent)
+  // Chat (AsyncGenerator backed by the subprocess event queue)
   // ============================================================
 
   protected async *chatImpl(
@@ -2008,27 +2020,43 @@ export class PiAgent extends BaseAgent {
         images: images.length > 0 ? images : undefined,
       });
 
-      // Yield events as they arrive. After each tool_result, check whether
-      // a session-scoped tool (source_test) activated a new source — if so,
-      // yield source_activated and force-abort the turn for auto-retry.
-      // Mirrors the same check in ClaudeAgent.chatImpl; Pi's subprocess only
-      // picks up new proxy tools on the next handlePrompt, so the restart
-      // is needed here too.
+      // Yield events as they arrive. The source-activation drain controller
+      // captures a pending restart on the first triggering tool_result and
+      // drains sibling tool_results from the same parallel-tool batch before
+      // firing `source_activated` + `forceAbort` — Pi's subprocess only picks
+      // up new proxy tools on the next handlePrompt, so the restart is needed
+      // here too. Without the drain, sibling tool_results from parallel
+      // source_test calls are lost (#790).
+      const sourceActivationDrain = new SourceActivationDrainController('fire-on-non-tool-result');
       for await (const event of this.eventQueue.drain()) {
-        yield event;
-        if (event.type === 'tool_result') {
-          const pendingRestart = this.consumePendingSourceActivationRestart();
-          if (pendingRestart) {
-            this.debug(`source_test activated "${pendingRestart.sourceSlug}", interrupting turn for auto-retry`);
-            yield {
-              type: 'source_activated' as const,
-              sourceSlug: pendingRestart.sourceSlug,
-              originalMessage: pendingRestart.userMessage,
-            };
-            this.forceAbort(AbortReason.SourceActivated);
-            return;
-          }
+        // Pre-yield check: when we're past capture and the incoming event is
+        // not a tool_result, fire BEFORE yielding it (the event belongs to
+        // the about-to-be-aborted next turn — letting it through would leak
+        // a fragment of the cancelled response into the session journal).
+        const preFire = sourceActivationDrain.shouldFireBeforeEvent(event);
+        if (preFire) {
+          this.debug(`source_test activated "${preFire.sourceSlug}", drained sibling tool_results, restarting turn`);
+          yield preFire;
+          this.forceAbort(AbortReason.SourceActivated);
+          return;
         }
+
+        if (sourceActivationDrain.observe(event, () => this.consumePendingSourceActivationRestart())) {
+          yield event;
+          continue;
+        }
+
+        yield event;
+      }
+
+      // Stream-end fallback: queue drained naturally with a captured restart
+      // still pending. Fire and return (no further events expected).
+      const sourceActivationFireAtEnd = sourceActivationDrain.shouldFireAtBoundary();
+      if (sourceActivationFireAtEnd) {
+        this.debug(`source_test activated "${sourceActivationFireAtEnd.sourceSlug}", stream ended with pending restart, restarting turn`);
+        yield sourceActivationFireAtEnd;
+        this.forceAbort(AbortReason.SourceActivated);
+        return;
       }
     } catch (error) {
       if (error instanceof Error && error.message.includes('abort')) {
@@ -2227,7 +2255,7 @@ export class PiAgent extends BaseAgent {
   }
 
   // ============================================================
-  // Session ID overrides (match CopilotAgent pattern)
+  // Session ID overrides — Pi maintains its own subprocess session id
   // ============================================================
 
   override getSessionId(): string | null {
