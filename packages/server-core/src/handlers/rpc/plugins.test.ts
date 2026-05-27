@@ -44,6 +44,8 @@ function createMockServer() {
     },
     push() {},
     async invokeClient() {},
+    hasClientCapability() { return false },
+    findClientsWithCapability() { return [] },
   }
 
   return { server, handlers }
