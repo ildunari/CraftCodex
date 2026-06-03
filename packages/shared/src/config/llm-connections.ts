@@ -15,6 +15,7 @@ import {
   type ModelDefinition,
   ANTHROPIC_MODELS,
   getModelById,
+  normalizeDeprecatedModelId,
 } from './models';
 import type { CredentialManager } from '../credentials/manager.ts';
 import type { NativeCapabilityPolicy } from '../agent/backend/native-capabilities.ts';
@@ -675,23 +676,43 @@ export function getModelsForProviderType(providerType: LlmProviderType, piAuthPr
  * Format: bare model IDs (without pi/ prefix). Matched against pi/{id} or pi/{id}-*.
  */
 export const PI_PREFERRED_DEFAULTS: Record<string, string[]> = {
-  anthropic: ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
-  openai: ['gpt-5.2', 'gpt-5.1', 'gpt-5', 'o4-mini', 'o3', 'gpt-4o'],
-  'openai-codex': ['gpt-5.2', 'gpt-5.1', 'gpt-5', 'o4-mini', 'o3', 'gpt-4o'],
-  google: ['gemini-3-pro-preview', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview', 'gemini-2.5-pro', 'gemini-2.5-flash'],
+  anthropic: ['claude-opus-4-8', 'claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
+  openai: ['gpt-5.5', 'gpt-5.2', 'gpt-5.1', 'gpt-5', 'o4-mini', 'o3', 'gpt-4o'],
+  'openai-codex': ['gpt-5.5', 'gpt-5.2', 'gpt-5.1', 'gpt-5', 'o4-mini', 'o3', 'gpt-4o'],
+  // Stable models first so the connection-setup test (which uses
+  // getDefaultModelForConnection) lands on a reliable model.
+  // gemini-3-pro-preview and gemini-3.1-pro-preview are intermittently
+  // unresponsive on generateContent — verified against the live API in
+  // April 2026 — and are deliberately excluded from defaults.
+  google: ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview'],
+  deepseek: ['deepseek-v4-pro', 'deepseek-v4-flash'],
   'github-copilot': ['claude-sonnet-4-6', 'gpt-5', 'o4-mini', 'claude-haiku-4-5'],
-  'amazon-bedrock': ['us.anthropic.claude-opus-4-6-v1', 'us.anthropic.claude-sonnet-4-6', 'us.anthropic.claude-haiku-4-5-20251001-v1:0'],
+  'amazon-bedrock': ['claude-opus-4-8', 'claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
 };
 
 export function getDefaultModelsForConnection(providerType: LlmProviderType, piAuthProvider?: string): Array<ModelDefinition | string> {
   if (providerType === 'pi') {
     const models = _piModelResolver(piAuthProvider);
-    // Sort preferred defaults first so getDefaultModelForConnection picks a modern model
+    // Sort preferred defaults first so getDefaultModelForConnection picks a modern model.
+    // For Bedrock models, the Pi SDK returns IDs like pi/us.anthropic.claude-opus-4-8
+    // but preferred defaults use bare IDs (claude-opus-4-8). We match via both direct
+    // comparison and reverse Bedrock ID mapping.
     const preferred = (piAuthProvider && PI_PREFERRED_DEFAULTS[piAuthProvider]) || [];
     if (preferred.length > 0) {
+      const findPreferredIndex = (id: string): number => {
+        const bare = id.startsWith('pi/') ? id.slice(3) : id
+        const direct = preferred.findIndex(p => bare === p || bare.startsWith(`${p}-`))
+        if (direct >= 0) return direct
+        const reversed = fromBedrockNativeId(bare)
+        if (reversed !== bare) {
+          return preferred.findIndex(p => reversed === p || reversed.startsWith(`${p}-`))
+        }
+        return -1
+      }
+
       models.sort((a, b) => {
-        const aIdx = preferred.findIndex(p => a.id === `pi/${p}` || a.id.startsWith(`pi/${p}-`));
-        const bIdx = preferred.findIndex(p => b.id === `pi/${p}` || b.id.startsWith(`pi/${p}-`));
+        const aIdx = findPreferredIndex(a.id);
+        const bIdx = findPreferredIndex(b.id);
         const aPrio = aIdx >= 0 ? aIdx : preferred.length;
         const bPrio = bIdx >= 0 ? bIdx : preferred.length;
         return aPrio - bPrio;
@@ -896,14 +917,16 @@ export function isValidProviderAuthCombination(
  * Source: Pi SDK registry (models.generated.js) — us.* variants
  */
 const BEDROCK_MODEL_MAP: Record<string, string> = {
-  'claude-opus-4-6': 'us.anthropic.claude-opus-4-6-v1',
+  'claude-opus-4-8': 'us.anthropic.claude-opus-4-8',
+  'claude-opus-4-7': 'us.anthropic.claude-opus-4-7',
   'claude-sonnet-4-6': 'us.anthropic.claude-sonnet-4-6',
   'claude-haiku-4-5-20251001': 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
   // Older models (for migration of existing connections)
   'claude-opus-4-5-20251101': 'us.anthropic.claude-opus-4-5-20251101-v1:0',
   'claude-sonnet-4-5-20250929': 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
   // Also map base IDs (without region prefix) to US inference profiles
-  'anthropic.claude-opus-4-6-v1': 'us.anthropic.claude-opus-4-6-v1',
+  'anthropic.claude-opus-4-8': 'us.anthropic.claude-opus-4-8',
+  'anthropic.claude-opus-4-7': 'us.anthropic.claude-opus-4-7',
   'anthropic.claude-sonnet-4-6': 'us.anthropic.claude-sonnet-4-6',
   'anthropic.claude-haiku-4-5-20251001-v1:0': 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
   'anthropic.claude-opus-4-5-20251101-v1:0': 'us.anthropic.claude-opus-4-5-20251101-v1:0',
@@ -913,37 +936,66 @@ const BEDROCK_MODEL_MAP: Record<string, string> = {
 /** Reverse map: all known Bedrock ID variants → bare Anthropic ID */
 const BEDROCK_REVERSE_MAP: Record<string, string> = {
   // US inference profiles
-  'us.anthropic.claude-opus-4-6-v1': 'claude-opus-4-6',
+  'us.anthropic.claude-opus-4-8': 'claude-opus-4-8',
+  'us.anthropic.claude-opus-4-7': 'claude-opus-4-7',
+  'us.anthropic.claude-opus-4-7-v1': 'claude-opus-4-7',
   'us.anthropic.claude-sonnet-4-6': 'claude-sonnet-4-6',
   'us.anthropic.claude-haiku-4-5-20251001-v1:0': 'claude-haiku-4-5-20251001',
   'us.anthropic.claude-opus-4-5-20251101-v1:0': 'claude-opus-4-5-20251101',
   'us.anthropic.claude-sonnet-4-5-20250929-v1:0': 'claude-sonnet-4-5-20250929',
   // EU inference profiles
-  'eu.anthropic.claude-opus-4-6-v1': 'claude-opus-4-6',
+  'eu.anthropic.claude-opus-4-8': 'claude-opus-4-8',
+  'eu.anthropic.claude-opus-4-7': 'claude-opus-4-7',
+  'eu.anthropic.claude-opus-4-7-v1': 'claude-opus-4-7',
   'eu.anthropic.claude-sonnet-4-6': 'claude-sonnet-4-6',
   'eu.anthropic.claude-haiku-4-5-20251001-v1:0': 'claude-haiku-4-5-20251001',
   'eu.anthropic.claude-opus-4-5-20251101-v1:0': 'claude-opus-4-5-20251101',
   'eu.anthropic.claude-sonnet-4-5-20250929-v1:0': 'claude-sonnet-4-5-20250929',
   // Global inference profiles
-  'global.anthropic.claude-opus-4-6-v1': 'claude-opus-4-6',
+  'global.anthropic.claude-opus-4-8': 'claude-opus-4-8',
+  'global.anthropic.claude-opus-4-7': 'claude-opus-4-7',
+  'global.anthropic.claude-opus-4-7-v1': 'claude-opus-4-7',
   'global.anthropic.claude-sonnet-4-6': 'claude-sonnet-4-6',
   'global.anthropic.claude-haiku-4-5-20251001-v1:0': 'claude-haiku-4-5-20251001',
   // Base IDs (no region prefix)
-  'anthropic.claude-opus-4-6-v1': 'claude-opus-4-6',
+  'anthropic.claude-opus-4-8': 'claude-opus-4-8',
+  'anthropic.claude-opus-4-7': 'claude-opus-4-7',
+  'anthropic.claude-opus-4-7-v1': 'claude-opus-4-7',
   'anthropic.claude-sonnet-4-6': 'claude-sonnet-4-6',
   'anthropic.claude-haiku-4-5-20251001-v1:0': 'claude-haiku-4-5-20251001',
   'anthropic.claude-opus-4-5-20251101-v1:0': 'claude-opus-4-5-20251101',
   'anthropic.claude-sonnet-4-5-20250929-v1:0': 'claude-sonnet-4-5-20250929',
 }
 
-/** Map a bare Anthropic model ID to its Bedrock-native equivalent. Pass-through if already native or unknown. */
-export function toBedrockNativeId(modelId: string): string {
-  return BEDROCK_MODEL_MAP[modelId] ?? modelId
+/**
+ * Derive the Bedrock inference profile region prefix from an AWS region string.
+ * Returns 'us', 'eu', or 'us' (default fallback for regions without inference profiles).
+ */
+export function deriveBedrockRegionPrefix(awsRegion?: string): string {
+  if (!awsRegion) return 'us'
+  if (awsRegion.startsWith('eu-')) return 'eu'
+  // US regions and all others (ap-*, me-*, etc.) use US inference profiles
+  return 'us'
+}
+
+/**
+ * Map a bare Anthropic model ID to its Bedrock-native equivalent.
+ * Uses the specified region prefix (default: 'us') for inference profile IDs.
+ * Pass-through if already native or unknown.
+ */
+export function toBedrockNativeId(modelId: string, regionPrefix?: string): string {
+  const normalizedModelId = normalizeDeprecatedModelId(modelId)
+  const nativeId = BEDROCK_MODEL_MAP[normalizedModelId]
+  if (!nativeId) return normalizedModelId
+  if (!regionPrefix || regionPrefix === 'us') return nativeId
+  // BEDROCK_MODEL_MAP stores us.* variants — swap the region prefix
+  return nativeId.replace(/^us\./, `${regionPrefix}.`)
 }
 
 /** Map a Bedrock-native model ID back to its bare Anthropic equivalent. Pass-through if already bare or unknown. */
 export function fromBedrockNativeId(modelId: string): string {
-  return BEDROCK_REVERSE_MAP[modelId] ?? modelId
+  const normalizedModelId = normalizeDeprecatedModelId(modelId)
+  return BEDROCK_REVERSE_MAP[normalizedModelId] ?? normalizedModelId
 }
 
 /**
@@ -953,10 +1005,11 @@ export function fromBedrockNativeId(modelId: string): string {
  */
 export function normalizeBedrockModelId(
   modelId: string | undefined,
+  regionPrefix?: string,
 ): string {
   if (!modelId) return '';
   const bare = modelId.startsWith('pi/') ? modelId.slice(3) : modelId
-  return toBedrockNativeId(bare)
+  return toBedrockNativeId(bare, regionPrefix)
 }
 
 // ============================================================

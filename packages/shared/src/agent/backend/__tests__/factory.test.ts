@@ -24,9 +24,9 @@ import {
   connectionAuthTypeToBackendAuthType,
   createBuiltInBackendPluginManifests,
   providerTypeToAgentProvider,
+  resolveModelForProvider,
   resolveSetupTestConnectionHint,
   createBackendFromConnection,
-  resolveModelForProvider,
   testBackendConnection,
   validateStoredBackendConnection,
   BACKEND_CAPABILITIES,
@@ -208,10 +208,14 @@ describe('built-in backend plugin manifests', () => {
     expect(manifests.map((manifest) => manifest.id)).toEqual([
       'craft.backend.anthropic',
       'craft.backend.pi',
+      'craft.backend.acp',
+      'craft.backend.codex',
     ]);
     expect(manifests.map((manifest) => manifest.contributions.backends?.[0])).toEqual([
       'anthropic',
       'pi',
+      'acp',
+      'codex',
     ]);
   });
 });
@@ -546,7 +550,7 @@ describe('phase4 backend abstraction APIs', () => {
         appRootPath: process.cwd(),
         isPackaged: false,
       },
-    })).rejects.toThrow('Dynamic model discovery not available for Bedrock/Vertex connections');
+    })).rejects.toThrow('Anthropic credentials required to fetch models');
   });
 
   it('validateStoredBackendConnection returns not found for unknown slug', async () => {
@@ -596,6 +600,18 @@ describe('phase4 backend abstraction APIs', () => {
     });
 
     expect(result.success).toBe(true);
+  });
+});
+
+describe('resolveModelForProvider', () => {
+  it('falls back to the Pi connection default when a normalized stale model is not in the connection list', () => {
+    const connection = {
+      providerType: 'pi',
+      defaultModel: 'pi/claude-opus-4-7',
+      models: ['pi/claude-opus-4-7', 'pi/claude-sonnet-4-6'],
+    } as unknown as LlmConnection;
+
+    expect(resolveModelForProvider('pi', 'pi/claude-opus-4-6', connection)).toBe('pi/claude-opus-4-7');
   });
 });
 

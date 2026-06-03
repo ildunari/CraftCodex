@@ -225,7 +225,7 @@ export interface ClaudeAgentConfig {
   mcpPool?: McpClientPool;
   /** LLM connection slug for credential lookup in postInit(). */
   connectionSlug?: string;
-  /** Enable 1M context window for Opus 4.7. Default: true. Set false to use 200K and conserve usage limits. */
+  /** Enable 1M context window for current Opus models. Default: true. Set false to use 200K and conserve usage limits. */
   enable1MContext?: boolean;
 }
 
@@ -564,7 +564,7 @@ export class ClaudeAgent extends BaseAgent {
 
   constructor(config: ClaudeAgentConfig) {
     // Resolve model: prioritize session model > config model (caller must provide via connection)
-    const model = config.session?.model ?? config.model!;
+    const model = config.session?.model ?? config.model ?? DEFAULT_MODEL;
     const connection = config.connectionSlug ? getLlmConnection(config.connectionSlug) : null;
 
     // Build BackendConfig for BaseAgent
@@ -2877,7 +2877,7 @@ This is a branched conversation. All prior messages in this conversation are par
     const options = {
       ...getDefaultOptions(this.config.envOverrides),
       model,
-      // Reasoning-model outputs (Opus 4.7 extended thinking) can span multiple SDK-counted
+      // Reasoning-model outputs (Opus extended thinking) can span multiple SDK-counted
       // turns even with no tools exposed. Tool surface here is empty, so no tool-use loop risk.
       maxTurns: 10,
       systemPrompt: request.systemPrompt ?? 'Reply with ONLY the requested text. No explanation.',
