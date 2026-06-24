@@ -8,7 +8,7 @@
 
 // Import model types and lists from centralized registry
 // NOTE: Pi SDK functions (getPiModelsForAuthProvider, getAllPiModels) are NOT imported
-// here because @mariozechner/pi-ai transitively pulls in @aws-sdk which uses Node.js
+// here because @earendil-works/pi-ai transitively pulls in @aws-sdk which uses Node.js
 // `stream` module — breaking the Vite renderer build. Instead, Pi model resolution is
 // injected at app startup via registerPiModelResolver().
 import {
@@ -31,7 +31,7 @@ let _piModelResolver: PiModelResolver = () => [];
 /**
  * Register the Pi model resolver function.
  * Must be called from main process at app startup (before any Pi connections are used).
- * This avoids pulling @mariozechner/pi-ai into the renderer bundle.
+ * This avoids pulling @earendil-works/pi-ai into the renderer bundle.
  */
 export function registerPiModelResolver(resolver: PiModelResolver): void {
   _piModelResolver = resolver;
@@ -49,10 +49,13 @@ export function registerPiModelResolver(resolver: PiModelResolver): void {
  * - 'anthropic_compat': Anthropic-format compatible endpoints (OpenRouter, etc.)
  * - 'bedrock': AWS Bedrock (Claude models via AWS)
  * - 'vertex': Google Vertex AI (Claude models via GCP)
- * - 'pi': Pi unified LLM API (20+ providers via @mariozechner/pi-ai)
- * - 'pi_compat': Pi with custom endpoint (Ollama, self-hosted models)
+ * - 'pi': Pi unified LLM API (20+ providers via @earendil-works/pi-ai)
+ * - 'pi_compat': Pi with custom endpoint (Ollama, self-hosted models, Anthropic-compat endpoints)
  * - 'acp': Agent Client Protocol stdio bridge (Codex, Droid, or compatible gateways)
  * - 'codex': Native Codex app-server backend
+ *
+ * Legacy values (bedrock, vertex, anthropic_compat) are migrated on startup
+ * by migrateLegacyProviderTypes() in storage.ts.
  */
 export type LlmProviderType =
   | 'anthropic'
